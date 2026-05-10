@@ -30,7 +30,7 @@ async function main(): Promise<number> {
   const since = new Date(Date.now() - INGEST_WINDOW_HOURS * 60 * 60 * 1000)
   const sources: Source[] = [
     ingestLocalClaudeSessions({
-      machine: 'm4x',
+      machine: cfg.machine,
       sourceDir: path.join(homedir(), '.claude', 'projects'),
     }),
   ]

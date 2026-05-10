@@ -18,4 +18,19 @@ describe('parseConfig', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '' })
     expect(result).toBeInstanceOf(ConfigError)
   })
+
+  test('defaults machine to "local" when DREAM_MACHINE is unset', () => {
+    const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
+    if (result instanceof Error) throw result
+    expect(result.machine).toBe('local')
+  })
+
+  test('reads machine label from DREAM_MACHINE', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_MACHINE: 'm4x',
+    })
+    if (result instanceof Error) throw result
+    expect(result.machine).toBe('m4x')
+  })
 })

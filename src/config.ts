@@ -8,10 +8,12 @@ export class ConfigError extends errore.createTaggedError({
 
 const configSchema = z.object({
   DREAM_DATA_DIR: z.string().min(1),
+  DREAM_MACHINE: z.string().min(1).default('local'),
 })
 
 export type Config = {
   dataDir: string
+  machine: string
 }
 
 export function parseConfig(
@@ -24,5 +26,8 @@ export function parseConfig(
       cause: parsed.error,
     })
   }
-  return { dataDir: parsed.data.DREAM_DATA_DIR }
+  return {
+    dataDir: parsed.data.DREAM_DATA_DIR,
+    machine: parsed.data.DREAM_MACHINE,
+  }
 }

@@ -21,15 +21,15 @@ See parent `dream-xh9u` for: full source contract definition, run-log schema, on
 
 ## Acceptance criteria
 
-- [x] `.env.example` content provided to user (sandbox blocks `.env*` writes); user to create the file
-- [x] `src/config.ts` exposes a Zod-validated config object; missing/invalid env returns a `ConfigError` and `main.ts` exits 1 with a clear message
-- [x] `src/config.test.ts` covers: valid env parses, missing required returns ConfigError, empty value returns ConfigError
+- [x] `.env.example` content provided to user (sandbox blocks `.env*` writes); user to create the file. Vars: `DREAM_DATA_DIR` (required), `DREAM_MACHINE` (optional, defaults to `local`)
+- [x] `src/config.ts` exposes a Zod-validated config object (`{dataDir, machine}`); missing/invalid env returns a `ConfigError` and `main.ts` exits 1 with a clear message. `DREAM_MACHINE` defaults to `local` so the tool runs out of the box
+- [x] `src/config.test.ts` covers: valid env parses, missing required returns ConfigError, empty value returns ConfigError, machine defaults to `local`, machine read from `DREAM_MACHINE`
 - [x] `src/ingest/orchestrator.ts` exports `run()` plus the `Source` and `SourceResult` types it owns; computes `outDir = {dataDir}/raw/{machine}/{source}/`, wipes + recreates before calling `pull()`, runs sources concurrently, times each call, catches throws and converts via tagged `SourceFailure` to error entries
 - [x] `src/ingest/orchestrator.test.ts` uses fake sources for: wipe-before-pull, partial failure isolation, durationMs recorded both outcomes, concurrent execution under 1.8x single sleep
 - [x] `src/ingest/log.ts` is a pure function from `ReadonlyArray<SourceResult>` + run window to the `_meta/YYYY-MM-DD.json` payload; output is Zod-validated; pretty-print happens at write time in `main.ts`
 - [x] `src/ingest/log.test.ts` covers: all-ok, error-entry verbatim, mixed, all-error, zero sources, ISO timestamp formatting
 - [x] `src/ingest/main.ts` loads config, builds sources, calls `run()`, writes the run log; exits 1 only if config invalid or `_meta/` write fails (catastrophic); otherwise 0
-- [x] `ingestLocalClaudeSessions({machine, sourceDir})` factory in `src/ingest/sources/local-claude-sessions.ts` implements `Source` with the supplied machine label + `claude-sessions`; Bun glob over `<sourceDir>/**/*.jsonl` filtered by mtime > since, excludes `subagents` segment, copies preserving relative path; returns `{files_pulled, bytes}` (orchestrator adds durationMs). `main.ts` wires it with `machine: 'm4x'`.
+- [x] `ingestLocalClaudeSessions({machine, sourceDir})` factory in `src/ingest/sources/local-claude-sessions.ts` implements `Source` with the supplied machine label + `claude-sessions`; Bun glob over `<sourceDir>/**/*.jsonl` filtered by mtime > since, excludes `subagents` segment, copies preserving relative path; returns `{files_pulled, bytes}` (orchestrator adds durationMs). `main.ts` wires it with `machine: cfg.machine` (i.e. from `DREAM_MACHINE`, default `local`).
 - [x] `src/ingest/sources/local-claude-sessions.test.ts` per-test tmp dir, asserts labels (incl. machine pass-through), copied set, subagent exclusion, byte count
 - [x] `package.json` `scripts.ingest` runs `bun src/ingest/main.ts`
 - [x] `bun run check` passes (fmt, lint, typecheck, test, knip)

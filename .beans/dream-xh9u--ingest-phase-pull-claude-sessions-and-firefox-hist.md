@@ -35,7 +35,7 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 15. As a Dream operator, I want the run log to distinguish **connection status** (ok/error) from **data quantity** (rows/files pulled), so "echo up but I didn't work on it" looks different from "echo unreachable".
 16. As a developer, I want each source implemented in the simplest way for its case, with no shared transport or `Machine` abstraction, so the code stays inspectable and adding a new source means writing one new file with the simplest possible impl.
 17. As a developer, I want the `Source` contract to be `{ machine: string, source: string, pull({ outDir, since }): Promise<Metrics> }`, so the orchestrator can wipe the right directory, time the call, catch errors, and build the log entry from the labels — without sources owning any of that.
-18. As a developer, I want all environment configuration (`ECHO_HOST`, `FIREFOX_PROFILE`, `DREAM_DATA_DIR`) loaded from `.env` (Bun auto-loads) and validated by a Zod schema at startup, so misconfiguration fails loud immediately rather than mid-pull.
+18. As a developer, I want all environment configuration (`DREAM_DATA_DIR`, `DREAM_MACHINE`, `ECHO_HOST`, `FIREFOX_PROFILE`) loaded from `.env` (Bun auto-loads) and validated by a Zod schema at startup, so misconfiguration fails loud immediately rather than mid-pull.
 19. As a developer, I want test files as siblings of the modules they test (e.g. `local-firefox.ts` + `local-firefox.test.ts`), so test discovery is local to the module and refactors move tests with code.
 20. As a developer, I want each test to arrange its own fixtures (e.g. create a tiny tmp `places.sqlite` with only the rows that case needs), so failing tests are self-explanatory and there's no shared fixture coupling.
 21. As a developer, I want types exported from the module that defines them (not a central `types.ts`), so changes are localised.
@@ -96,7 +96,8 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 **Configuration**
 
 - `.env` loaded by Bun (no dotenv). Validated by a Zod schema in `src/config.ts`; invalid env throws at startup.
-- Required: `ECHO_HOST`, `FIREFOX_PROFILE`, `DREAM_DATA_DIR`.
+- Required: `DREAM_DATA_DIR`, `ECHO_HOST` (when ssh source is enabled), `FIREFOX_PROFILE` (when firefox source is enabled).
+- Optional: `DREAM_MACHINE` — label written into `data/raw/{machine}/...` for sources running on the local box. Defaults to `local` so the tool works out of the box; set to e.g. `m4x` when the on-disk layout should reflect the actual host name.
 - The Firefox blocklist lives at `config/firefox-blocklist.txt` (plain text, user-editable, version-controlled).
 
 **Error handling**
