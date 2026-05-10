@@ -36,7 +36,7 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 16. As a developer, I want each source implemented in the simplest way for its case, with no shared transport or `Machine` abstraction, so the code stays inspectable and adding a new source means writing one new file with the simplest possible impl.
 17. As a developer, I want the `Source` contract to be `{ machine: string, source: string, pull({ outDir, since }): Promise<Metrics> }`, so the orchestrator can wipe the right directory, time the call, catch errors, and build the log entry from the labels — without sources owning any of that.
 18. As a developer, I want all environment configuration (`ECHO_HOST`, `FIREFOX_PROFILE`, `DREAM_DATA_DIR`) loaded from `.env` (Bun auto-loads) and validated by a Zod schema at startup, so misconfiguration fails loud immediately rather than mid-pull.
-19. As a developer, I want test files as siblings of the modules they test (e.g. `m4x-firefox.ts` + `m4x-firefox.test.ts`), so test discovery is local to the module and refactors move tests with code.
+19. As a developer, I want test files as siblings of the modules they test (e.g. `local-firefox.ts` + `local-firefox.test.ts`), so test discovery is local to the module and refactors move tests with code.
 20. As a developer, I want each test to arrange its own fixtures (e.g. create a tiny tmp `places.sqlite` with only the rows that case needs), so failing tests are self-explanatory and there's no shared fixture coupling.
 21. As a developer, I want types exported from the module that defines them (not a central `types.ts`), so changes are localised.
 22. As a developer, I want Taskmaster to invoke the ingest as a single command and treat any non-zero exit as catastrophic only — per-source failures are first-class log content, not exit codes.
@@ -109,9 +109,11 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 - `src/ingest/orchestrator.ts` — exports `run()` and the `Source`/`SourceResult` types it owns.
 - `src/ingest/log.ts` — pure: takes `Array<SourceResult>` + run window, returns/writes the structured JSON. Exports `RunLog` type if needed.
 - `src/ingest/main.ts` — `bun run ingest` entry; thin wrapper over `orchestrator.run()`.
-- `src/ingest/sources/m4x-claude-sessions.ts` — local glob + copy.
-- `src/ingest/sources/echo-claude-sessions.ts` — ssh+tar pipeline via `Bun.$`.
-- `src/ingest/sources/m4x-firefox.ts` — `bun:sqlite` + blocklist + csv emit.
+- `src/ingest/sources/local-claude-sessions.ts` — local glob + copy. Factory `ingestLocalClaudeSessions({machine, sourceDir})`; machine label is supplied by the caller so the same module can be used wherever the orchestrator runs.
+- `src/ingest/sources/ssh-claude-sessions.ts` — ssh+tar pipeline via `Bun.$`. Factory `ingestSshClaudeSessions({machine, host})`.
+- `src/ingest/sources/local-firefox.ts` — `bun:sqlite` + blocklist + csv emit. Factory `ingestLocalFirefox({machine, profileDir})`.
+
+Source files are named by **transport** (`local-`, `ssh-`), not by machine. The machine label is a runtime input passed in by `main.ts` — currently `m4x` for local sources, `echo` for the ssh source.
 
 **Out of band**
 
@@ -123,19 +125,19 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 
 - Tests assert **external behaviour visible to the next phase** (files written, metrics returned, log shape) — not internal control flow.
 - Each test arranges its own fixtures inline (a tmp dir, a handcrafted sqlite, a 2-line blocklist), acts on the module under test, asserts on the side-effects. No shared `tests/fixtures/` directory.
-- Tests live as siblings of the code they test (e.g. `m4x-firefox.ts` + `m4x-firefox.test.ts`).
+- Tests live as siblings of the code they test (e.g. `local-firefox.ts` + `local-firefox.test.ts`).
 
 **Modules with tests**
 
 - **`src/ingest/log.ts`** — pure function, easy to cover exhaustively. Cases: all-ok, mixed-ok-and-error, all-error, zero sources, ISO timestamp formatting, Zod schema acceptance.
 - **`src/ingest/orchestrator.ts`** — using fake Source objects. Cases: wipe occurred before pull (pre-existing file in outDir is gone after run); partial failure (one source throws, others still run, log captures all three); duration is recorded even on throw; concurrent execution (two slow sources have wall-time ≈ max not sum).
-- **`src/ingest/sources/m4x-firefox.ts`** — arrange-per-test pattern. Each test creates a tmp `places.sqlite` via `bun:sqlite` with only the rows under test (in-window vs out-of-window, blocklisted vs not, duplicate URLs collapsed) plus a tiny blocklist file, calls `pull(...)`, asserts the emitted csv rows + `blocklist_filtered` count. Lock-safe copy is exercised by the module pulling against a sqlite that's currently open in the test process.
+- **`src/ingest/sources/local-firefox.ts`** — arrange-per-test pattern. Each test creates a tmp `places.sqlite` via `bun:sqlite` with only the rows under test (in-window vs out-of-window, blocklisted vs not, duplicate URLs collapsed) plus a tiny blocklist file, calls `pull(...)`, asserts the emitted csv rows + `blocklist_filtered` count. Lock-safe copy is exercised by the module pulling against a sqlite that's currently open in the test process.
 - **`src/config.ts`** — Zod validation: missing required env throws, valid env returns parsed config.
 
 **Modules without tests**
 
-- `src/ingest/sources/m4x-claude-sessions.ts` — almost entirely fs glob + copy. If a smoke test is added, it'd just exercise `Bun.Glob`. Skipped unless a specific bug motivates one.
-- `src/ingest/sources/echo-claude-sessions.ts` — integration-only (real ssh, real remote fs). Mocking ssh has low ROI. Manual smoke test as part of the rollout.
+- `src/ingest/sources/local-claude-sessions.ts` — almost entirely fs glob + copy. If a smoke test is added, it'd just exercise `Bun.Glob`. Skipped unless a specific bug motivates one.
+- `src/ingest/sources/ssh-claude-sessions.ts` — integration-only (real ssh, real remote fs). Mocking ssh has low ROI. Manual smoke test as part of the rollout.
 - `src/ingest/main.ts` — wiring only.
 
 **Prior art** — none in this repo yet; this is the first TypeScript module. The Python prototype in `prototype-py/` is not a reference for test patterns.

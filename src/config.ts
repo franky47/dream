@@ -1,0 +1,28 @@
+import * as errore from 'errore'
+import { z } from 'zod'
+
+export class ConfigError extends errore.createTaggedError({
+  name: 'ConfigError',
+  message: 'Invalid configuration: $reason',
+}) {}
+
+const configSchema = z.object({
+  DREAM_DATA_DIR: z.string().min(1),
+})
+
+export type Config = {
+  dataDir: string
+}
+
+export function parseConfig(
+  env: Record<string, string | undefined>,
+): Config | ConfigError {
+  const parsed = configSchema.safeParse(env)
+  if (!parsed.success) {
+    return new ConfigError({
+      reason: z.prettifyError(parsed.error),
+      cause: parsed.error,
+    })
+  }
+  return { dataDir: parsed.data.DREAM_DATA_DIR }
+}

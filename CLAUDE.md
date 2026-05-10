@@ -1,6 +1,6 @@
 ## TypeScript Type Discipline
 
-**The `typescript-advanced-types` skill is mandatory for all TypeScript work in this project.** Load it before writing or reviewing any `.ts` file. Always use Zod to parse & validate external data coming into the program, and infer from schemas.
+**The `typescript-advanced-types` skill is mandatory for all TypeScript work in this project.** Load it before writing or reviewing any `.ts` file. Always use Zod to parse & validate external data coming into the program (use camelCase for schema names), and infer from schemas (use PascalCase for inferred types).
 
 ## Conventions
 

@@ -8,7 +8,7 @@ created_at: 2026-05-10T12:33:01Z
 updated_at: 2026-05-10T12:33:01Z
 parent: dream-xh9u
 blocked_by:
-    - dream-b7nn
+  - dream-b7nn
 ---
 
 ## What to build
@@ -22,8 +22,8 @@ See parent `dream-xh9u` for the source contract, the run-log shape, and the rati
 ## Acceptance criteria
 
 - [ ] `src/config.ts` (and `.env.example`) extended with `ECHO_HOST` (Zod-validated, required only when this source is active)
-- [ ] `src/ingest/sources/echo-claude-sessions.ts` implements the `Source` contract with `machine: "echo"`, `source: "claude-sessions"`
-- [ ] The pull executes a single ssh+tar pipeline: `ssh ${ECHO_HOST} "cd ~/.claude && find projects -name '*.jsonl' -newermt '${since}' -not -path '*/subagents/*' -print0 | tar --null -czf - -T -" | tar -xzf - -C ${outDir}`
+- [ ] `src/ingest/sources/ssh-claude-sessions.ts` exports `ingestSshClaudeSessions({machine, host})`, implementing the `Source` contract with the supplied machine label + `source: "claude-sessions"` (wired in `main.ts` with `machine: "echo", host: ECHO_HOST`)
+- [ ] The pull executes a single ssh+tar pipeline: `ssh ${host} "cd ~/.claude && find projects -name '*.jsonl' -newermt '${since}' -not -path '*/subagents/*' -print0 | tar --null -czf - -T -" | tar -xzf - -C ${outDir}`
 - [ ] `since` is formatted as `YYYY-MM-DD HH:MM:SS` (BSD-find compatible)
 - [ ] Sub-agent transcripts are excluded
 - [ ] Non-zero exit from the ssh or tar invocation throws an `errore`-typed error carrying machine + source labels and the underlying exit code / stderr; the orchestrator catches this and records `status: "error"` in the run log without aborting other sources
