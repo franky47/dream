@@ -1,14 +1,21 @@
 {
   "name": "dream",
   "private": true,
+  "imports": {
+    "#src/*": "./src/*"
+  },
   "scripts": {
-    "lint": "oxlint src/",
-    "fmt": "oxfmt src/",
-    "fmt:check": "oxfmt --check src/",
-    "typecheck": "tsgo --noEmit",
-    "test": "bun test",
     "check": "bun run fmt:check && bun run lint && bun run typecheck && bun test && bun knip",
-    "knip": "knip"
+    "fmt": "oxfmt",
+    "fmt:check": "oxfmt --check",
+    "knip": "knip",
+    "lint": "oxlint src/",
+    "test": "bun test",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "errore": "^0.14.1",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -17,9 +24,5 @@
     "oxfmt": "^0.48.0",
     "oxlint": "^1.58.0",
     "oxlint-tsgolint": "^0.22.1"
-  },
-  "dependencies": {
-    "errore": "^0.14.1",
-    "zod": "^4.4.3"
   }
 }

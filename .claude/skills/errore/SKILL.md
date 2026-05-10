@@ -470,17 +470,24 @@ async function importData(url: string, dbUrl: string) {
 **After — flat with `await using`:**
 
 ```ts
-async function importData(url: string, dbUrl: string): Promise<ImportError | { rows: number }> {
+async function importData(
+  url: string,
+  dbUrl: string,
+): Promise<ImportError | { rows: number }> {
   await using cleanup = new errore.AsyncDisposableStack()
 
-  const db = await connectDb(dbUrl).catch((e) => new ImportError({ reason: 'db connect', cause: e }))
+  const db = await connectDb(dbUrl).catch(
+    (e) => new ImportError({ reason: 'db connect', cause: e }),
+  )
   if (db instanceof Error) return db
   cleanup.defer(() => db.close())
 
   const tmpFile = await createTempFile()
   cleanup.defer(() => tmpFile.delete())
 
-  const response = await fetch(url).catch((e) => new ImportError({ reason: 'fetch', cause: e }))
+  const response = await fetch(url).catch(
+    (e) => new ImportError({ reason: 'fetch', cause: e }),
+  )
   if (response instanceof Error) return response
 
   await tmpFile.write(await response.text())
@@ -619,12 +626,16 @@ Check `signal.aborted` before side effects or async operations — same early-re
 
 ```ts
 for (const item of items) {
-  if (signal.aborted) return                    // before work
-  const data = await fetchData(item.id, { signal })
-    .catch((e) => new FetchError({ id: item.id, cause: e }))
-  if (errore.isAbortError(data)) return         // after async
-  if (data instanceof Error) { console.warn(data.message); continue }
-  if (signal.aborted) return                    // before write
+  if (signal.aborted) return // before work
+  const data = await fetchData(item.id, { signal }).catch(
+    (e) => new FetchError({ id: item.id, cause: e }),
+  )
+  if (errore.isAbortError(data)) return // after async
+  if (data instanceof Error) {
+    console.warn(data.message)
+    continue
+  }
+  if (signal.aborted) return // before write
   await db.save(data)
 }
 ```
