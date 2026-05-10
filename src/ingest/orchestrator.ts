@@ -38,18 +38,12 @@ export type RunOutcome = {
   results: SourceResult[]
 }
 
-function describeError(e: unknown): {
+function describeError(e: SourceFailure): {
   name: string
   message: string
-  tag: string | null
+  tag: string
 } {
-  if (errore.isTaggedError(e)) {
-    return { name: e.name, message: e.message, tag: e._tag }
-  }
-  if (e instanceof Error) {
-    return { name: e.name, message: e.message, tag: null }
-  }
-  return { name: 'NonError', message: String(e), tag: null }
+  return { name: e.name, message: e.message, tag: e._tag }
 }
 
 async function runOne({
@@ -63,24 +57,41 @@ async function runOne({
 }): Promise<SourceResult> {
   const outDir = path.join(dataDir, 'raw', source.machine, source.source)
   const start = performance.now()
-  const prep = await rm(outDir, { recursive: true, force: true })
-    .then(() => mkdir(outDir, { recursive: true }))
-    .catch(
-      (e) =>
-        new SourceFailure({
-          machine: source.machine,
-          source: source.source,
-          reason: 'failed to prepare outDir',
-          cause: e,
-        }),
-    )
-  if (prep instanceof Error) {
+  const removed = await rm(outDir, { recursive: true, force: true }).catch(
+    (e) =>
+      new SourceFailure({
+        machine: source.machine,
+        source: source.source,
+        reason: 'failed to remove outDir',
+        cause: e,
+      }),
+  )
+  if (removed instanceof Error) {
     return {
       machine: source.machine,
       source: source.source,
       status: 'error',
       durationMs: Math.round(performance.now() - start),
-      error: describeError(prep),
+      error: describeError(removed),
+    }
+  }
+
+  const made = await mkdir(outDir, { recursive: true }).catch(
+    (e) =>
+      new SourceFailure({
+        machine: source.machine,
+        source: source.source,
+        reason: 'failed to create outDir',
+        cause: e,
+      }),
+  )
+  if (made instanceof Error) {
+    return {
+      machine: source.machine,
+      source: source.source,
+      status: 'error',
+      durationMs: Math.round(performance.now() - start),
+      error: describeError(made),
     }
   }
 

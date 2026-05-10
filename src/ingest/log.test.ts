@@ -93,7 +93,11 @@ describe('buildRunLog', () => {
           source: 'firefox',
           status: 'error',
           durationMs: 5,
-          error: { name: 'Error', message: 'sqlite locked', tag: null },
+          error: {
+            name: 'SourceFailure',
+            message: 'sqlite locked',
+            tag: 'SourceFailure',
+          },
         },
       ],
     })
@@ -112,7 +116,11 @@ describe('buildRunLog', () => {
           source: 'claude-sessions',
           status: 'error',
           durationMs: 1,
-          error: { name: 'Error', message: 'glob failed', tag: null },
+          error: {
+            name: 'SourceFailure',
+            message: 'glob failed',
+            tag: 'SourceFailure',
+          },
         },
         {
           machine: 'echo',
