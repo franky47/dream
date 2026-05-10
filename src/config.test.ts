@@ -58,16 +58,16 @@ describe('parseConfig', () => {
     expect(result.remoteClaudeSessionsHosts).toEqual(['echo', 'alpha'])
   })
 
-  test('firefoxProfiles is empty when FIREFOX_PROFILES is unset', () => {
+  test('firefoxProfiles is empty when DREAM_FIREFOX_PROFILES is unset', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
     if (result instanceof Error) throw result
     expect(result.firefoxProfiles).toEqual([])
   })
 
-  test('parses comma-separated FIREFOX_PROFILES', () => {
+  test('parses comma-separated DREAM_FIREFOX_PROFILES', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      FIREFOX_PROFILES: '/path/to/work,/path/to/personal',
+      DREAM_FIREFOX_PROFILES: '/path/to/work,/path/to/personal',
     })
     if (result instanceof Error) throw result
     expect(result.firefoxProfiles).toEqual([
@@ -76,10 +76,10 @@ describe('parseConfig', () => {
     ])
   })
 
-  test('trims whitespace and ignores empty entries in FIREFOX_PROFILES', () => {
+  test('trims whitespace and ignores empty entries in DREAM_FIREFOX_PROFILES', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      FIREFOX_PROFILES: ' /a , , /b ,',
+      DREAM_FIREFOX_PROFILES: ' /a , , /b ,',
     })
     if (result instanceof Error) throw result
     expect(result.firefoxProfiles).toEqual(['/a', '/b'])

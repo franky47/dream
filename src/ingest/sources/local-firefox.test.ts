@@ -231,4 +231,34 @@ describe('ingestLocalFirefox', () => {
       db.close()
     }
   })
+
+  test('pull succeeds against a WAL+EXCLUSIVE-locked db (Firefox-style)', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://wal-locked.example/',
+        title: 'firefox-style',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+      },
+    ])
+    db.run('PRAGMA journal_mode=WAL')
+    db.run('PRAGMA locking_mode=EXCLUSIVE')
+    // force the exclusive lock to actually be acquired by performing a write
+    db.prepare(
+      'INSERT INTO moz_places (url, title, last_visit_date) VALUES (?, ?, ?)',
+    ).run(
+      'https://force-lock.example/',
+      'forced',
+      new Date('2026-05-09T13:00:00Z').getTime() * 1000,
+    )
+    try {
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      const metrics = await src.pull({ outDir, since: SINCE })
+      expect(metrics.rows).toBeGreaterThanOrEqual(1)
+      const files = readdirSync(outDir)
+      const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
+      expect(csv).toContain('https://wal-locked.example/')
+    } finally {
+      db.close()
+    }
+  })
 })

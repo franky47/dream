@@ -1,5 +1,11 @@
 import { Database } from 'bun:sqlite'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -45,22 +51,23 @@ function snapshotPlaces(profileDir: string): string {
       cause,
     })
   }
+  // Plain fs copy bypasses SQLite's advisory locks. Firefox keeps
+  // places.sqlite under PRAGMA locking_mode=EXCLUSIVE while running, which
+  // blocks any other SQLite connection (and therefore VACUUM INTO) from
+  // opening the file. We mirror the original shell exporter: copy main first,
+  // then -wal so committed-but-uncheckpointed entries are visible.
   const target = path.join(tmp, 'places.sqlite')
   try {
-    const src = new Database(path.join(profileDir, 'places.sqlite'), {
-      readonly: true,
-    })
-    try {
-      const escaped = target.replace(/'/g, "''")
-      src.run(`VACUUM INTO '${escaped}'`)
-    } finally {
-      src.close()
+    copyFileSync(path.join(profileDir, 'places.sqlite'), target)
+    const wal = path.join(profileDir, 'places.sqlite-wal')
+    if (existsSync(wal)) {
+      copyFileSync(wal, `${target}-wal`)
     }
   } catch (cause) {
     rmSync(tmp, { recursive: true, force: true })
     throw new LocalFirefoxFailure({
       stage: 'snapshot',
-      reason: 'VACUUM INTO',
+      reason: 'fs copy',
       cause,
     })
   }
