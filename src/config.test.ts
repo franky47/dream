@@ -33,4 +33,27 @@ describe('parseConfig', () => {
     if (result instanceof Error) throw result
     expect(result.machine).toBe('m4x')
   })
+
+  test('echoHost is null when DREAM_ECHO_HOST is unset', () => {
+    const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
+    if (result instanceof Error) throw result
+    expect(result.echoHost).toBeNull()
+  })
+
+  test('echoHost is read from DREAM_ECHO_HOST when set', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_ECHO_HOST: 'echo.local',
+    })
+    if (result instanceof Error) throw result
+    expect(result.echoHost).toBe('echo.local')
+  })
+
+  test('returns ConfigError when DREAM_ECHO_HOST is empty', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_ECHO_HOST: '',
+    })
+    expect(result).toBeInstanceOf(ConfigError)
+  })
 })

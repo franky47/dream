@@ -9,11 +9,13 @@ export class ConfigError extends errore.createTaggedError({
 const configSchema = z.object({
   DREAM_DATA_DIR: z.string().min(1),
   DREAM_MACHINE: z.string().min(1).default('local'),
+  DREAM_ECHO_HOST: z.string().min(1).optional(),
 })
 
 export type Config = {
   dataDir: string
   machine: string
+  echoHost: string | null
 }
 
 export function parseConfig(
@@ -29,5 +31,6 @@ export function parseConfig(
   return {
     dataDir: parsed.data.DREAM_DATA_DIR,
     machine: parsed.data.DREAM_MACHINE,
+    echoHost: parsed.data.DREAM_ECHO_HOST ?? null,
   }
 }

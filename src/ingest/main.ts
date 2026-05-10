@@ -8,6 +8,7 @@ import { parseConfig } from '#src/config'
 import { buildRunLog } from '#src/ingest/log'
 import { run, type Source } from '#src/ingest/orchestrator'
 import { ingestLocalClaudeSessions } from '#src/ingest/sources/local-claude-sessions'
+import { ingestSshClaudeSessions } from '#src/ingest/sources/ssh-claude-sessions'
 
 const INGEST_WINDOW_HOURS = 48
 
@@ -34,6 +35,11 @@ async function main(): Promise<number> {
       sourceDir: path.join(homedir(), '.claude', 'projects'),
     }),
   ]
+  if (cfg.echoHost) {
+    sources.push(
+      ingestSshClaudeSessions({ machine: 'echo', host: cfg.echoHost }),
+    )
+  }
 
   const outcome = await run({ sources, dataDir: cfg.dataDir, since })
 
