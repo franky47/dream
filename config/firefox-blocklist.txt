@@ -1,0 +1,25 @@
+# Firefox domain blocklist for the ingest pipeline.
+#
+# One domain per line. Entries are lowercase hostnames; matching is exact-host
+# OR suffix (so `twitter.com` covers `twitter.com` and `m.twitter.com`).
+# Lines starting with `#` are comments. Trailing `# ...` comments are stripped.
+# Blank lines are ignored.
+#
+# Tune this list against real Firefox csv output — the goal is to keep coarse,
+# high-volume noise (news aggregators, social platforms, infinite-scroll feeds)
+# out of the pipeline so the enrichment phase only sees URLs worth thinking
+# about. Smart per-URL sensitive-content filtering happens later via local
+# model in the enrichment phase; this is the deterministic pre-filter.
+
+# --- Social / feeds ---
+twitter.com
+x.com
+facebook.com
+instagram.com
+tiktok.com
+reddit.com
+linkedin.com
+
+# --- News aggregators ---
+news.ycombinator.com
+news.google.com

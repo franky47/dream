@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import * as errore from 'errore'
 
@@ -48,6 +49,9 @@ async function main(): Promise<number> {
           'Firefox',
           'Profiles',
           name,
+        ),
+        blocklistPath: fileURLToPath(
+          new URL('../../config/firefox-blocklist.txt', import.meta.url),
         ),
       }),
     ),

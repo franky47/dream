@@ -3,6 +3,7 @@ import {
   copyFileSync,
   existsSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   statSync,
 } from 'node:fs'
@@ -115,14 +116,46 @@ const QUERY = `
   ORDER BY visited DESC
 `
 
+function loadBlocklist(blocklistPath: string | undefined): string[] {
+  if (!blocklistPath) return []
+  let raw: string
+  try {
+    raw = readFileSync(blocklistPath, 'utf-8')
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new LocalFirefoxFailure({
+      stage: 'blocklist',
+      reason: `read ${blocklistPath}: ${detail}`,
+      cause,
+    })
+  }
+  return raw
+    .split('\n')
+    .map((line) => line.replace(/#.*$/, '').trim())
+    .filter((line) => line.length > 0)
+}
+
+function isBlocked(url: string, blocklist: ReadonlyArray<string>): boolean {
+  if (blocklist.length === 0) return false
+  let host: string
+  try {
+    host = new URL(url).hostname
+  } catch {
+    return false
+  }
+  return blocklist.some((entry) => host === entry || host.endsWith(`.${entry}`))
+}
+
 export function ingestLocalFirefox(opts: {
   machine: string
   profileDir: string
+  blocklistPath?: string
 }): Source {
   return {
     machine: opts.machine,
     source: 'firefox',
     pull: async ({ outDir, since }) => {
+      const blocklist = loadBlocklist(opts.blocklistPath)
       const snapshotPath = snapshotPlaces(opts.profileDir)
       let raw: unknown
       try {
@@ -130,7 +163,9 @@ export function ingestLocalFirefox(opts: {
       } finally {
         rmSync(path.dirname(snapshotPath), { recursive: true, force: true })
       }
-      const rows = placeRowsSchema.parse(raw)
+      const allRows = placeRowsSchema.parse(raw)
+      const rows = allRows.filter((r) => !isBlocked(r.url, blocklist))
+      const blocklistFiltered = allRows.length - rows.length
 
       const lines = ['visited,url,title']
       for (const r of rows) {
@@ -142,7 +177,12 @@ export function ingestLocalFirefox(opts: {
       const outPath = path.join(outDir, `${localDateStamp(new Date())}.csv`)
       await Bun.write(outPath, csv)
       const bytes = statSync(outPath).size
-      return { files_pulled: 1, bytes, rows: rows.length }
+      return {
+        files_pulled: 1,
+        bytes,
+        rows: rows.length,
+        blocklist_filtered: blocklistFiltered,
+      }
     },
   }
 }

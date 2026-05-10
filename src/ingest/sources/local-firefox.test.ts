@@ -1,6 +1,12 @@
 import { Database } from 'bun:sqlite'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import {
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -10,6 +16,11 @@ let workDir: string
 let profileDir: string
 let outDir: string
 let placesPath: string
+let blocklistPath: string
+
+function writeBlocklist(contents: string): void {
+  writeFileSync(blocklistPath, contents)
+}
 
 const SINCE = new Date('2026-05-08T00:00:00.000Z')
 
@@ -52,6 +63,8 @@ beforeEach(() => {
   mkdirSync(profileDir, { recursive: true })
   mkdirSync(outDir, { recursive: true })
   placesPath = path.join(profileDir, 'places.sqlite')
+  blocklistPath = path.join(workDir, 'blocklist.txt')
+  writeFileSync(blocklistPath, '')
 })
 
 afterEach(() => {
@@ -230,6 +243,204 @@ describe('ingestLocalFirefox', () => {
     } finally {
       db.close()
     }
+  })
+
+  test('drops rows whose host exactly matches a blocklist entry', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://twitter.com/home',
+        title: 'twitter',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+      },
+      {
+        url: 'https://example.com/keep',
+        title: 'keep',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+      },
+    ])
+    db.close()
+    writeBlocklist('twitter.com\n')
+
+    const src = ingestLocalFirefox({
+      machine: 'm4x',
+      profileDir,
+      blocklistPath,
+    })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    const files = readdirSync(outDir)
+    const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
+    expect(csv).not.toContain('twitter.com')
+    expect(csv).toContain('example.com/keep')
+    expect(metrics.rows).toBe(1)
+    expect(metrics.blocklist_filtered).toBe(1)
+  })
+
+  test('drops rows whose host is a subdomain of a blocklist entry', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://m.twitter.com/feed',
+        title: 'mobile twitter',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+      },
+      {
+        url: 'https://nottwitter.com/keep',
+        title: 'unrelated',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+      },
+    ])
+    db.close()
+    writeBlocklist('twitter.com\n')
+
+    const src = ingestLocalFirefox({
+      machine: 'm4x',
+      profileDir,
+      blocklistPath,
+    })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    const files = readdirSync(outDir)
+    const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
+    expect(csv).not.toContain('m.twitter.com')
+    expect(csv).toContain('nottwitter.com')
+    expect(metrics.rows).toBe(1)
+    expect(metrics.blocklist_filtered).toBe(1)
+  })
+
+  test('ignores comments and blank lines in the blocklist file', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://blocked.example/x',
+        title: 'b',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+      },
+      {
+        url: 'https://kept.example/y',
+        title: 'k',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+      },
+    ])
+    db.close()
+    writeBlocklist(
+      [
+        '# top comment',
+        '',
+        'blocked.example  # trailing comment',
+        '   ',
+        '# kept.example is intentionally not blocklisted',
+      ].join('\n') + '\n',
+    )
+
+    const src = ingestLocalFirefox({
+      machine: 'm4x',
+      profileDir,
+      blocklistPath,
+    })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    const files = readdirSync(outDir)
+    const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
+    expect(csv).not.toContain('blocked.example')
+    expect(csv).toContain('kept.example/y')
+    expect(metrics.blocklist_filtered).toBe(1)
+  })
+
+  test('blocklist_filtered equals number of dropped rows', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://a.bad.example/1',
+        title: 'a',
+        lastVisit: new Date('2026-05-09T08:00:00Z'),
+      },
+      {
+        url: 'https://m.bad.example/2',
+        title: 'b',
+        lastVisit: new Date('2026-05-09T09:00:00Z'),
+      },
+      {
+        url: 'https://bad.example/3',
+        title: 'c',
+        lastVisit: new Date('2026-05-09T10:00:00Z'),
+      },
+      {
+        url: 'https://good.example/4',
+        title: 'd',
+        lastVisit: new Date('2026-05-09T11:00:00Z'),
+      },
+    ])
+    db.close()
+    writeBlocklist('bad.example\n')
+
+    const src = ingestLocalFirefox({
+      machine: 'm4x',
+      profileDir,
+      blocklistPath,
+    })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    expect(metrics.rows).toBe(1)
+    expect(metrics.blocklist_filtered).toBe(3)
+  })
+
+  test('rows whose url has no parseable host are kept and not counted as filtered', async () => {
+    // about:blank-style and other host-less schemes parse to hostname '' —
+    // they shouldn't match a real-domain blocklist entry. Locks in the
+    // fail-open semantics of isBlocked.
+    const db = createPlacesDb([
+      {
+        url: 'about:blank',
+        title: 'blank',
+        lastVisit: new Date('2026-05-09T08:00:00Z'),
+      },
+      {
+        url: 'https://blocked.example/x',
+        title: 'b',
+        lastVisit: new Date('2026-05-09T09:00:00Z'),
+      },
+    ])
+    db.close()
+    writeBlocklist('blocked.example\n')
+
+    const src = ingestLocalFirefox({
+      machine: 'm4x',
+      profileDir,
+      blocklistPath,
+    })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    const files = readdirSync(outDir)
+    const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
+    expect(csv).toContain('about:blank')
+    expect(csv).not.toContain('blocked.example')
+    expect(metrics.rows).toBe(1)
+    expect(metrics.blocklist_filtered).toBe(1)
+  })
+
+  test('blocklist_filtered is 0 when no rows match', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://a.example/1',
+        title: 'a',
+        lastVisit: new Date('2026-05-09T08:00:00Z'),
+      },
+      {
+        url: 'https://b.example/2',
+        title: 'b',
+        lastVisit: new Date('2026-05-09T09:00:00Z'),
+      },
+    ])
+    db.close()
+    writeBlocklist('# nothing blocked\n')
+
+    const src = ingestLocalFirefox({
+      machine: 'm4x',
+      profileDir,
+      blocklistPath,
+    })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    expect(metrics.rows).toBe(2)
+    expect(metrics.blocklist_filtered).toBe(0)
   })
 
   test('pull succeeds against a WAL+EXCLUSIVE-locked db (Firefox-style)', async () => {
