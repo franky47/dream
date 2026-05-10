@@ -34,27 +34,27 @@ describe('parseConfig', () => {
     expect(result.machine).toBe('m4x')
   })
 
-  test('remoteMachines is empty when DREAM_REMOTE_MACHINES is unset', () => {
+  test('remoteCcSessionsHosts is empty when DREAM_REMOTE_CC_SESSIONS_HOSTS is unset', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
     if (result instanceof Error) throw result
-    expect(result.remoteMachines).toEqual([])
+    expect(result.remoteCcSessionsHosts).toEqual([])
   })
 
-  test('parses comma-separated DREAM_REMOTE_MACHINES', () => {
+  test('parses comma-separated DREAM_REMOTE_CC_SESSIONS_HOSTS', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      DREAM_REMOTE_MACHINES: 'echo,alpha,beta',
+      DREAM_REMOTE_CC_SESSIONS_HOSTS: 'echo,alpha,beta',
     })
     if (result instanceof Error) throw result
-    expect(result.remoteMachines).toEqual(['echo', 'alpha', 'beta'])
+    expect(result.remoteCcSessionsHosts).toEqual(['echo', 'alpha', 'beta'])
   })
 
-  test('trims whitespace and ignores empty entries in DREAM_REMOTE_MACHINES', () => {
+  test('trims whitespace and ignores empty entries in DREAM_REMOTE_CC_SESSIONS_HOSTS', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      DREAM_REMOTE_MACHINES: ' echo , , alpha ,',
+      DREAM_REMOTE_CC_SESSIONS_HOSTS: ' echo , , alpha ,',
     })
     if (result instanceof Error) throw result
-    expect(result.remoteMachines).toEqual(['echo', 'alpha'])
+    expect(result.remoteCcSessionsHosts).toEqual(['echo', 'alpha'])
   })
 })

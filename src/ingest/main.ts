@@ -34,7 +34,9 @@ async function main(): Promise<number> {
       machine: cfg.machine,
       sourceDir: path.join(homedir(), '.claude', 'projects'),
     }),
-    ...cfg.remoteMachines.map((host) => ingestSshClaudeSessions({ host })),
+    ...cfg.remoteCcSessionsHosts.map((host) =>
+      ingestSshClaudeSessions({ host }),
+    ),
   ]
 
   const outcome = await run({ sources, dataDir: cfg.dataDir, since })

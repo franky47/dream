@@ -9,16 +9,16 @@ export class ConfigError extends errore.createTaggedError({
 const configSchema = z.object({
   DREAM_DATA_DIR: z.string().min(1),
   DREAM_MACHINE: z.string().min(1).default('local'),
-  DREAM_REMOTE_MACHINES: z.string().default(''),
+  DREAM_REMOTE_CC_SESSIONS_HOSTS: z.string().default(''),
 })
 
 export type Config = {
   dataDir: string
   machine: string
-  remoteMachines: string[]
+  remoteCcSessionsHosts: string[]
 }
 
-function parseRemoteMachines(raw: string): string[] {
+function parseHostList(raw: string): string[] {
   return raw
     .split(',')
     .map((s) => s.trim())
@@ -38,6 +38,8 @@ export function parseConfig(
   return {
     dataDir: parsed.data.DREAM_DATA_DIR,
     machine: parsed.data.DREAM_MACHINE,
-    remoteMachines: parseRemoteMachines(parsed.data.DREAM_REMOTE_MACHINES),
+    remoteCcSessionsHosts: parseHostList(
+      parsed.data.DREAM_REMOTE_CC_SESSIONS_HOSTS,
+    ),
   }
 }
