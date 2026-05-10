@@ -19,6 +19,15 @@ function formatSinceForFind(d: Date): string {
   return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`
 }
 
+function buildRemoteCmd(since: Date): string {
+  const sinceStr = formatSinceForFind(since)
+  return (
+    `cd ~/.claude && find projects -name '*.jsonl' ` +
+    `-newermt '${sinceStr}' -not -path '*/subagents/*' -print0 ` +
+    `| tar --null -czf - -T -`
+  )
+}
+
 async function readAll(
   stream: ReadableStream<Uint8Array> | null,
 ): Promise<string> {
@@ -26,61 +35,73 @@ async function readAll(
   return new Response(stream).text()
 }
 
+export async function runSshTarPipeline(opts: {
+  upstream: string[]
+  outDir: string
+  host: string
+}): Promise<{ files_pulled: number; bytes: number }> {
+  const ssh = Bun.spawn(opts.upstream, {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: 'ignore',
+  })
+  const tar = Bun.spawn(['tar', '-xzf', '-', '-C', opts.outDir], {
+    stdin: ssh.stdout,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+
+  const [sshExit, tarExit, sshStderr, tarStderr] = await Promise.all([
+    ssh.exited,
+    tar.exited,
+    readAll(ssh.stderr),
+    readAll(tar.stderr),
+  ])
+
+  if (sshExit !== 0 || tarExit !== 0) {
+    const stderr = [sshStderr, tarStderr]
+      .filter((s) => s.trim().length > 0)
+      .join(' | ')
+      .slice(0, 500)
+      .trim()
+    throw new SshSourceFailure({
+      machine: opts.host,
+      source: SOURCE,
+      host: opts.host,
+      sshExit,
+      tarExit,
+      stderr: stderr || '(no stderr captured)',
+    })
+  }
+
+  const glob = new Glob('**/*.jsonl')
+  let filesPulled = 0
+  let bytes = 0
+  for await (const rel of glob.scan({ cwd: opts.outDir, onlyFiles: true })) {
+    const info = await stat(path.join(opts.outDir, rel))
+    filesPulled += 1
+    bytes += info.size
+  }
+  return { files_pulled: filesPulled, bytes }
+}
+
 export function ingestSshClaudeSessions(opts: { host: string }): Source {
   return {
     machine: opts.host,
     source: SOURCE,
-    pull: async ({ outDir, since }) => {
-      const sinceStr = formatSinceForFind(since)
-      const remoteCmd =
-        `cd ~/.claude && find projects -name '*.jsonl' ` +
-        `-newermt '${sinceStr}' -not -path '*/subagents/*' -print0 ` +
-        `| tar --null -czf - -T -`
-
+    pull: async ({ outDir, since }) =>
       // BatchMode=yes ensures ssh fails fast on auth prompts instead of
-      // hanging in a non-interactive nightly run.
-      const ssh = Bun.spawn(
-        ['ssh', '-o', 'BatchMode=yes', opts.host, remoteCmd],
-        { stdout: 'pipe', stderr: 'pipe', stdin: 'ignore' },
-      )
-      const tar = Bun.spawn(['tar', '-xzf', '-', '-C', outDir], {
-        stdin: ssh.stdout,
-        stdout: 'pipe',
-        stderr: 'pipe',
-      })
-
-      const [sshExit, tarExit, sshStderr, tarStderr] = await Promise.all([
-        ssh.exited,
-        tar.exited,
-        readAll(ssh.stderr),
-        readAll(tar.stderr),
-      ])
-
-      if (sshExit !== 0 || tarExit !== 0) {
-        const stderr = [sshStderr, tarStderr]
-          .filter((s) => s.trim().length > 0)
-          .join(' | ')
-          .slice(0, 500)
-          .trim()
-        throw new SshSourceFailure({
-          machine: opts.host,
-          source: SOURCE,
-          host: opts.host,
-          sshExit,
-          tarExit,
-          stderr: stderr || '(no stderr captured)',
-        })
-      }
-
-      const glob = new Glob('**/*.jsonl')
-      let filesPulled = 0
-      let bytes = 0
-      for await (const rel of glob.scan({ cwd: outDir, onlyFiles: true })) {
-        const info = await stat(path.join(outDir, rel))
-        filesPulled += 1
-        bytes += info.size
-      }
-      return { files_pulled: filesPulled, bytes }
-    },
+      // hanging in a non-interactive run.
+      runSshTarPipeline({
+        upstream: [
+          'ssh',
+          '-o',
+          'BatchMode=yes',
+          opts.host,
+          buildRemoteCmd(since),
+        ],
+        outDir,
+        host: opts.host,
+      }),
   }
 }
