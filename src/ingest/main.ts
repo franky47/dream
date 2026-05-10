@@ -34,7 +34,7 @@ async function main(): Promise<number> {
       machine: cfg.machine,
       sourceDir: path.join(homedir(), '.claude', 'projects'),
     }),
-    ...cfg.remoteCcSessionsHosts.map((host) =>
+    ...cfg.remoteClaudeSessionsHosts.map((host) =>
       ingestSshClaudeSessions({ host }),
     ),
   ]
