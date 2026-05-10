@@ -10,7 +10,7 @@ const configSchema = z.object({
   DREAM_DATA_DIR: z.string().min(1),
   DREAM_MACHINE: z.string().min(1).default('local'),
   DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS: z.string().default(''),
-  FIREFOX_PROFILES: z.string().default(''),
+  DREAM_FIREFOX_PROFILES: z.string().default(''),
 })
 
 export type Config = {
@@ -43,6 +43,6 @@ export function parseConfig(
     remoteClaudeSessionsHosts: parseList(
       parsed.data.DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS,
     ),
-    firefoxProfiles: parseList(parsed.data.FIREFOX_PROFILES),
+    firefoxProfiles: parseList(parsed.data.DREAM_FIREFOX_PROFILES),
   }
 }
