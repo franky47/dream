@@ -8,6 +8,7 @@ import { parseConfig } from '#src/config'
 import { buildRunLog } from '#src/ingest/log'
 import { run, type Source } from '#src/ingest/orchestrator'
 import { ingestLocalClaudeSessions } from '#src/ingest/sources/local-claude-sessions'
+import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 import { ingestSshClaudeSessions } from '#src/ingest/sources/ssh-claude-sessions'
 
 const INGEST_WINDOW_HOURS = 48
@@ -36,6 +37,9 @@ async function main(): Promise<number> {
     }),
     ...cfg.remoteClaudeSessionsHosts.map((host) =>
       ingestSshClaudeSessions({ host }),
+    ),
+    ...cfg.firefoxProfiles.map((profileDir) =>
+      ingestLocalFirefox({ machine: cfg.machine, profileDir }),
     ),
   ]
 

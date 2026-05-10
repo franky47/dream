@@ -57,4 +57,31 @@ describe('parseConfig', () => {
     if (result instanceof Error) throw result
     expect(result.remoteClaudeSessionsHosts).toEqual(['echo', 'alpha'])
   })
+
+  test('firefoxProfiles is empty when FIREFOX_PROFILES is unset', () => {
+    const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
+    if (result instanceof Error) throw result
+    expect(result.firefoxProfiles).toEqual([])
+  })
+
+  test('parses comma-separated FIREFOX_PROFILES', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      FIREFOX_PROFILES: '/path/to/work,/path/to/personal',
+    })
+    if (result instanceof Error) throw result
+    expect(result.firefoxProfiles).toEqual([
+      '/path/to/work',
+      '/path/to/personal',
+    ])
+  })
+
+  test('trims whitespace and ignores empty entries in FIREFOX_PROFILES', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      FIREFOX_PROFILES: ' /a , , /b ,',
+    })
+    if (result instanceof Error) throw result
+    expect(result.firefoxProfiles).toEqual(['/a', '/b'])
+  })
 })

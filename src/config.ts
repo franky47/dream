@@ -10,15 +10,17 @@ const configSchema = z.object({
   DREAM_DATA_DIR: z.string().min(1),
   DREAM_MACHINE: z.string().min(1).default('local'),
   DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS: z.string().default(''),
+  FIREFOX_PROFILES: z.string().default(''),
 })
 
 export type Config = {
   dataDir: string
   machine: string
   remoteClaudeSessionsHosts: string[]
+  firefoxProfiles: string[]
 }
 
-function parseHostList(raw: string): string[] {
+function parseList(raw: string): string[] {
   return raw
     .split(',')
     .map((s) => s.trim())
@@ -38,8 +40,9 @@ export function parseConfig(
   return {
     dataDir: parsed.data.DREAM_DATA_DIR,
     machine: parsed.data.DREAM_MACHINE,
-    remoteClaudeSessionsHosts: parseHostList(
+    remoteClaudeSessionsHosts: parseList(
       parsed.data.DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS,
     ),
+    firefoxProfiles: parseList(parsed.data.FIREFOX_PROFILES),
   }
 }
