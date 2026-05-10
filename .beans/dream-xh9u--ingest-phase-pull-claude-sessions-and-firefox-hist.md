@@ -35,7 +35,7 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 15. As a Dream operator, I want the run log to distinguish **connection status** (ok/error) from **data quantity** (rows/files pulled), so "echo up but I didn't work on it" looks different from "echo unreachable".
 16. As a developer, I want each source implemented in the simplest way for its case, with no shared transport or `Machine` abstraction, so the code stays inspectable and adding a new source means writing one new file with the simplest possible impl.
 17. As a developer, I want the `Source` contract to be `{ machine: string, source: string, pull({ outDir, since }): Promise<Metrics> }`, so the orchestrator can wipe the right directory, time the call, catch errors, and build the log entry from the labels — without sources owning any of that.
-18. As a developer, I want all environment configuration (`DREAM_DATA_DIR`, `DREAM_MACHINE`, `ECHO_HOST`, `FIREFOX_PROFILE`) loaded from `.env` (Bun auto-loads) and validated by a Zod schema at startup, so misconfiguration fails loud immediately rather than mid-pull.
+18. As a developer, I want all environment configuration (`DREAM_DATA_DIR`, `DREAM_MACHINE`, `DREAM_REMOTE_MACHINES`, `FIREFOX_PROFILE`) loaded from `.env` (Bun auto-loads) and validated by a Zod schema at startup, so misconfiguration fails loud immediately rather than mid-pull.
 19. As a developer, I want test files as siblings of the modules they test (e.g. `local-firefox.ts` + `local-firefox.test.ts`), so test discovery is local to the module and refactors move tests with code.
 20. As a developer, I want each test to arrange its own fixtures (e.g. create a tiny tmp `places.sqlite` with only the rows that case needs), so failing tests are self-explanatory and there's no shared fixture coupling.
 21. As a developer, I want types exported from the module that defines them (not a central `types.ts`), so changes are localised.
@@ -66,7 +66,7 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 
 **ssh+tar specifics (echo claude-sessions)**
 
-- Single-round-trip pipeline: `ssh ${ECHO_HOST} "cd ~/.claude && find projects -name '*.jsonl' -newermt '${since}' -not -path '*/subagents/*' -print0 | tar --null -czf - -T -" | tar -xzf - -C ${outDir}`.
+- Single-round-trip pipeline (per remote host): `ssh ${host} "cd ~/.claude && find projects -name '*.jsonl' -newermt '${since}' -not -path '*/subagents/*' -print0 | tar --null -czf - -T -" | tar -xzf - -C ${outDir}`.
 - `since` formatted as `YYYY-MM-DD HH:MM:SS` (BSD-find-compatible).
 - Verified portable to macOS Monterey BSD userland (bsdtar 3.5.x supports `--null` + `-T -`; BSD find supports `-newermt`).
 
@@ -96,8 +96,9 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 **Configuration**
 
 - `.env` loaded by Bun (no dotenv). Validated by a Zod schema in `src/config.ts`; invalid env throws at startup.
-- Required: `DREAM_DATA_DIR`, `ECHO_HOST` (when ssh source is enabled), `FIREFOX_PROFILE` (when firefox source is enabled).
+- Required: `DREAM_DATA_DIR`. `FIREFOX_PROFILE` is required only when the firefox source is enabled.
 - Optional: `DREAM_MACHINE` — label written into `data/raw/{machine}/...` for sources running on the local box. Defaults to `local` so the tool works out of the box; set to e.g. `m4x` when the on-disk layout should reflect the actual host name.
+- Optional: `DREAM_REMOTE_MACHINES` — comma-separated list of ssh-resolvable hostnames (typically aliases from `~/.ssh/config`). Each entry registers an `ingestSshClaudeSessions({host})` source; the host string is used both as the ssh target and the on-disk machine label. Empty (default) means no remote sources.
 - The Firefox blocklist lives at `config/firefox-blocklist.txt` (plain text, user-editable, version-controlled).
 
 **Error handling**
@@ -111,7 +112,7 @@ A nightly **ingest** phase, scheduled by Taskmaster, that pulls all configured r
 - `src/ingest/log.ts` — pure: takes `Array<SourceResult>` + run window, returns/writes the structured JSON. Exports `RunLog` type if needed.
 - `src/ingest/main.ts` — `bun run ingest` entry; thin wrapper over `orchestrator.run()`.
 - `src/ingest/sources/local-claude-sessions.ts` — local glob + copy. Factory `ingestLocalClaudeSessions({machine, sourceDir})`; machine label is supplied by the caller so the same module can be used wherever the orchestrator runs.
-- `src/ingest/sources/ssh-claude-sessions.ts` — ssh+tar pipeline via `Bun.$`. Factory `ingestSshClaudeSessions({machine, host})`.
+- `src/ingest/sources/ssh-claude-sessions.ts` — ssh+tar pipeline via `Bun.spawn` (manual stream piping; `Bun.$` does not honour `set -o pipefail`, so a failing ssh in a pipeline returns 0). Factory `ingestSshClaudeSessions({host})`; the host string doubles as the on-disk machine label, so re-using the source for a different machine is a one-line change to `DREAM_REMOTE_MACHINES`.
 - `src/ingest/sources/local-firefox.ts` — `bun:sqlite` + blocklist + csv emit. Factory `ingestLocalFirefox({machine, profileDir})`.
 
 Source files are named by **transport** (`local-`, `ssh-`), not by machine. The machine label is a runtime input passed in by `main.ts` — currently `m4x` for local sources, `echo` for the ssh source.

@@ -26,12 +26,9 @@ async function readAll(
   return new Response(stream).text()
 }
 
-export function ingestSshClaudeSessions(opts: {
-  machine: string
-  host: string
-}): Source {
+export function ingestSshClaudeSessions(opts: { host: string }): Source {
   return {
-    machine: opts.machine,
+    machine: opts.host,
     source: SOURCE,
     pull: async ({ outDir, since }) => {
       const sinceStr = formatSinceForFind(since)
@@ -66,7 +63,7 @@ export function ingestSshClaudeSessions(opts: {
           .slice(0, 500)
           .trim()
         throw new SshSourceFailure({
-          machine: opts.machine,
+          machine: opts.host,
           source: SOURCE,
           host: opts.host,
           sshExit,

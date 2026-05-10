@@ -34,26 +34,27 @@ describe('parseConfig', () => {
     expect(result.machine).toBe('m4x')
   })
 
-  test('echoHost is null when DREAM_ECHO_HOST is unset', () => {
+  test('remoteMachines is empty when DREAM_REMOTE_MACHINES is unset', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
     if (result instanceof Error) throw result
-    expect(result.echoHost).toBeNull()
+    expect(result.remoteMachines).toEqual([])
   })
 
-  test('echoHost is read from DREAM_ECHO_HOST when set', () => {
+  test('parses comma-separated DREAM_REMOTE_MACHINES', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      DREAM_ECHO_HOST: 'echo.local',
+      DREAM_REMOTE_MACHINES: 'echo,alpha,beta',
     })
     if (result instanceof Error) throw result
-    expect(result.echoHost).toBe('echo.local')
+    expect(result.remoteMachines).toEqual(['echo', 'alpha', 'beta'])
   })
 
-  test('returns ConfigError when DREAM_ECHO_HOST is empty', () => {
+  test('trims whitespace and ignores empty entries in DREAM_REMOTE_MACHINES', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      DREAM_ECHO_HOST: '',
+      DREAM_REMOTE_MACHINES: ' echo , , alpha ,',
     })
-    expect(result).toBeInstanceOf(ConfigError)
+    if (result instanceof Error) throw result
+    expect(result.remoteMachines).toEqual(['echo', 'alpha'])
   })
 })
