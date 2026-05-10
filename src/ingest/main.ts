@@ -38,8 +38,18 @@ async function main(): Promise<number> {
     ...cfg.remoteClaudeSessionsHosts.map((host) =>
       ingestSshClaudeSessions({ host }),
     ),
-    ...cfg.firefoxProfiles.map((profileDir) =>
-      ingestLocalFirefox({ machine: cfg.machine, profileDir }),
+    ...cfg.firefoxProfiles.map((name) =>
+      ingestLocalFirefox({
+        machine: cfg.machine,
+        profileDir: path.join(
+          homedir(),
+          'Library',
+          'Application Support',
+          'Firefox',
+          'Profiles',
+          name,
+        ),
+      }),
     ),
   ]
 
