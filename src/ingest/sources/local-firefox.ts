@@ -65,9 +65,10 @@ function snapshotPlaces(profileDir: string): string {
     }
   } catch (cause) {
     rmSync(tmp, { recursive: true, force: true })
+    const detail = cause instanceof Error ? cause.message : String(cause)
     throw new LocalFirefoxFailure({
       stage: 'snapshot',
-      reason: 'fs copy',
+      reason: `fs copy from ${profileDir}: ${detail}`,
       cause,
     })
   }
@@ -83,9 +84,10 @@ function readPlaces(snapshotPath: string, since: Date): unknown {
       db.close()
     }
   } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
     throw new LocalFirefoxFailure({
       stage: 'query',
-      reason: 'reading places.sqlite',
+      reason: `reading places.sqlite: ${detail}`,
       cause,
     })
   }
