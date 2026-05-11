@@ -1,6 +1,20 @@
 import { describe, expect, test } from 'bun:test'
 
-import { renderBashTool, renderEditTool, renderWriteTool } from './tools.ts'
+import {
+  renderAgentTool,
+  renderAskUserQuestionTool,
+  renderBashTool,
+  renderEditTool,
+  renderGlobTool,
+  renderGrepTool,
+  renderReadTool,
+  renderSkillTool,
+  renderTodoWriteTool,
+  renderUnknownTool,
+  renderWebFetchTool,
+  renderWebSearchTool,
+  renderWriteTool,
+} from './tools.ts'
 
 describe('renderBashTool', () => {
   test('short output renders cmd + exit attrs and body verbatim', () => {
@@ -173,5 +187,256 @@ describe('renderEditTool', () => {
       },
     ])
     expect(out).not.toContain('@@')
+  })
+})
+
+describe('renderReadTool', () => {
+  test('self-closing with path attr only', () => {
+    const out = renderReadTool({
+      name: 'Read',
+      input: { file_path: '/x/y.ts', offset: 10, limit: 50 },
+    })
+    expect(out).toBe('<tool name="Read" path="/x/y.ts"/>')
+  })
+
+  test('escapes quotes in path', () => {
+    const out = renderReadTool({
+      name: 'Read',
+      input: { file_path: '/x/"weird".ts' },
+    })
+    expect(out).toContain('path="/x/&quot;weird&quot;.ts"')
+  })
+
+  test('missing path renders empty path attr (degrades gracefully)', () => {
+    const out = renderReadTool({ name: 'Read', input: {} })
+    expect(out).toBe('<tool name="Read" path=""/>')
+  })
+})
+
+describe('renderGlobTool', () => {
+  test('self-closing with pattern attr only', () => {
+    const out = renderGlobTool({
+      name: 'Glob',
+      input: { pattern: '**/*.ts', path: '/x' },
+    })
+    expect(out).toBe('<tool name="Glob" pattern="**/*.ts"/>')
+  })
+})
+
+describe('renderGrepTool', () => {
+  test('self-closing with pattern attr only', () => {
+    const out = renderGrepTool({
+      name: 'Grep',
+      input: { pattern: 'foo.*bar', path: '/x', output_mode: 'content' },
+    })
+    expect(out).toBe('<tool name="Grep" pattern="foo.*bar"/>')
+  })
+})
+
+describe('renderSkillTool', () => {
+  test('self-closing with args attr', () => {
+    const out = renderSkillTool({
+      name: 'Skill',
+      input: { skill: 'tdd', args: 'red green refactor' },
+    })
+    expect(out).toBe('<tool name="Skill" args="red green refactor"/>')
+  })
+
+  test('missing args renders empty args attr', () => {
+    const out = renderSkillTool({ name: 'Skill', input: { skill: 'tdd' } })
+    expect(out).toBe('<tool name="Skill" args=""/>')
+  })
+})
+
+describe('renderWebFetchTool', () => {
+  test('self-closing with url attr only', () => {
+    const out = renderWebFetchTool({
+      name: 'WebFetch',
+      input: { url: 'https://example.com/x', prompt: 'summarize' },
+    })
+    expect(out).toBe('<tool name="WebFetch" url="https://example.com/x"/>')
+  })
+})
+
+describe('renderWebSearchTool', () => {
+  test('self-closing with query attr only', () => {
+    const out = renderWebSearchTool({
+      name: 'WebSearch',
+      input: { query: 'claude code release notes', allowed_domains: ['x'] },
+    })
+    expect(out).toBe(
+      '<tool name="WebSearch" query="claude code release notes"/>',
+    )
+  })
+})
+
+describe('renderAgentTool', () => {
+  test('emits description attr and body with prompt + result', () => {
+    const out = renderAgentTool(
+      {
+        name: 'Agent',
+        input: { description: 'Find bug', prompt: 'Investigate X' },
+      },
+      { content: 'Found it in foo.ts', isError: false },
+    )
+    expect(out).toContain('<tool name="Agent" description="Find bug">')
+    expect(out).toContain('Investigate X')
+    expect(out).toContain('Found it in foo.ts')
+    expect(out.endsWith('</tool>')).toBe(true)
+  })
+
+  test('truncates long prompt with head/tail policy', () => {
+    const prompt = Array.from({ length: 500 }, (_, i) => `p${i}`).join('\n')
+    const result = Array.from({ length: 500 }, (_, i) => `r${i}`).join('\n')
+    const out = renderAgentTool(
+      { name: 'Agent', input: { description: 'big', prompt } },
+      { content: result, isError: false },
+    )
+    expect(out).toContain('p0')
+    expect(out).toContain('r0')
+    expect(out).toContain('p499')
+    expect(out).toContain('r499')
+    expect(out).toMatch(/elided/i)
+  })
+
+  test('no result yields tool with prompt only', () => {
+    const out = renderAgentTool(
+      { name: 'Agent', input: { description: 'd', prompt: 'P' } },
+      undefined,
+    )
+    expect(out).toContain('description="d"')
+    expect(out).toContain('P')
+    expect(out).not.toContain('isError')
+  })
+})
+
+describe('renderTodoWriteTool', () => {
+  test('emits one-line diff between adjacent states', () => {
+    const prev = [
+      { content: 'do X', status: 'pending' },
+      { content: 'do Y', status: 'in_progress' },
+    ]
+    const next = [
+      { content: 'do X', status: 'in_progress' },
+      { content: 'do Y', status: 'completed' },
+      { content: 'do Z', status: 'pending' },
+    ]
+    const out = renderTodoWriteTool(prev, next)
+    expect(out).toContain('<tool name="TodoWrite">')
+    expect(out).toContain('"do X" → in_progress')
+    expect(out).toContain('"do Y" → completed')
+    expect(out).toContain('+ "do Z"')
+    expect(out.endsWith('</tool>')).toBe(true)
+    const lines = out.split('\n')
+    expect(lines.length).toBe(3)
+  })
+
+  test('first call (no prev) emits all items as additions', () => {
+    const out = renderTodoWriteTool(null, [
+      { content: 'do X', status: 'pending' },
+    ])
+    expect(out).toContain('+ "do X"')
+  })
+
+  test('item removed emits minus', () => {
+    const out = renderTodoWriteTool(
+      [
+        { content: 'do X', status: 'pending' },
+        { content: 'do Y', status: 'pending' },
+      ],
+      [{ content: 'do X', status: 'pending' }],
+    )
+    expect(out).toContain('- "do Y"')
+  })
+
+  test('empty diff self-closes', () => {
+    const out = renderTodoWriteTool(
+      [{ content: 'do X', status: 'pending' }],
+      [{ content: 'do X', status: 'pending' }],
+    )
+    expect(out).toBe('<tool name="TodoWrite"/>')
+  })
+})
+
+describe('renderAskUserQuestionTool', () => {
+  test('emits Q→A list, one line per question', () => {
+    const out = renderAskUserQuestionTool(
+      {
+        name: 'AskUserQuestion',
+        input: {
+          questions: [
+            {
+              question: 'Which DB?',
+              options: [{ label: 'pg' }, { label: 'sqlite' }],
+            },
+            {
+              question: 'Which lang?',
+              options: [{ label: 'ts' }, { label: 'go' }],
+            },
+          ],
+        },
+      },
+      {
+        content: '{"answers":{"Which DB?":"pg","Which lang?":"ts"}}',
+        isError: false,
+      },
+    )
+    expect(out).toContain('<tool name="AskUserQuestion">')
+    expect(out).toContain('Q: Which DB? → A: pg')
+    expect(out).toContain('Q: Which lang? → A: ts')
+    expect(out.endsWith('</tool>')).toBe(true)
+  })
+
+  test('no result emits questions with empty answers', () => {
+    const out = renderAskUserQuestionTool(
+      {
+        name: 'AskUserQuestion',
+        input: { questions: [{ question: 'Pick?', options: [] }] },
+      },
+      undefined,
+    )
+    expect(out).toContain('Q: Pick? → A:')
+  })
+
+  test('non-JSON result content falls back to empty answers', () => {
+    const out = renderAskUserQuestionTool(
+      {
+        name: 'AskUserQuestion',
+        input: { questions: [{ question: 'Pick?', options: [] }] },
+      },
+      { content: 'free text', isError: false },
+    )
+    expect(out).toContain('Q: Pick? → A:')
+  })
+})
+
+describe('renderUnknownTool', () => {
+  test('preserves generic shape with flat attrs and body when result present', () => {
+    const out = renderUnknownTool(
+      { name: 'CustomTool', input: { foo: 'bar', n: 3 } },
+      { content: 'hello', isError: false },
+    )
+    expect(out).toContain('<tool name="CustomTool" foo="bar" n="3">')
+    expect(out).toContain('hello')
+    expect(out.endsWith('</tool>')).toBe(true)
+  })
+
+  test('self-closes when no result', () => {
+    const out = renderUnknownTool(
+      { name: 'CustomTool', input: { foo: 'bar' } },
+      undefined,
+    )
+    expect(out).toBe('<tool name="CustomTool" foo="bar"/>')
+  })
+
+  test('truncates large body with head/tail policy', () => {
+    const big = Array.from({ length: 500 }, (_, i) => `L${i}`).join('\n')
+    const out = renderUnknownTool(
+      { name: 'CustomTool', input: {} },
+      { content: big, isError: false },
+    )
+    expect(out).toContain('L0')
+    expect(out).toContain('L499')
+    expect(out).toMatch(/elided/i)
   })
 })

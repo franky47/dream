@@ -1,4 +1,5 @@
 import { diffLines } from 'diff'
+import { z } from 'zod'
 
 export interface ToolUseInput {
   name: string
@@ -136,4 +137,157 @@ export function renderEditTool(uses: ToolUseInput[]): string {
     unifiedDiffBody(asString(u.input.old_string), asString(u.input.new_string)),
   )
   return `<tool name="Edit" ${fileAttr} patches="${uses.length}">\n${diffs.join('\n')}\n</tool>`
+}
+
+function selfClosing(name: string, attr: string, value: string): string {
+  return `<tool name="${name}" ${attr}="${attrEscape(value)}"/>`
+}
+
+export function renderReadTool(use: ToolUseInput): string {
+  return selfClosing('Read', 'path', asString(use.input.file_path))
+}
+
+export function renderGlobTool(use: ToolUseInput): string {
+  return selfClosing('Glob', 'pattern', asString(use.input.pattern))
+}
+
+export function renderGrepTool(use: ToolUseInput): string {
+  return selfClosing('Grep', 'pattern', asString(use.input.pattern))
+}
+
+export function renderSkillTool(use: ToolUseInput): string {
+  return selfClosing('Skill', 'args', asString(use.input.args))
+}
+
+export function renderWebFetchTool(use: ToolUseInput): string {
+  return selfClosing('WebFetch', 'url', asString(use.input.url))
+}
+
+export function renderWebSearchTool(use: ToolUseInput): string {
+  return selfClosing('WebSearch', 'query', asString(use.input.query))
+}
+
+const AGENT_MAX_LINES = 200
+const AGENT_HEAD_LINES = 40
+const AGENT_TAIL_LINES = 40
+
+function agentTruncate(text: string): string {
+  const trimmed = trimTrailingNewline(text)
+  if (countLines(trimmed) <= AGENT_MAX_LINES) return trimmed
+  return headTailLines(trimmed, AGENT_HEAD_LINES, AGENT_TAIL_LINES)
+}
+
+export function renderAgentTool(
+  use: ToolUseInput,
+  result: ToolResult | undefined,
+): string {
+  const description = asString(use.input.description)
+  const prompt = asString(use.input.prompt)
+  const head = `<tool name="Agent" description="${attrEscape(description)}">`
+  const promptBody = agentTruncate(prompt)
+  if (result === undefined) {
+    return `${head}\n${promptBody}\n</tool>`
+  }
+  const resultBody = agentTruncate(result.content)
+  return `${head}\n${promptBody}\n---\n${resultBody}\n</tool>`
+}
+
+interface TodoItem {
+  content: string
+  status: string
+}
+
+function todoKey(t: TodoItem): string {
+  return t.content
+}
+
+function diffLine(item: TodoItem, prev: TodoItem | undefined): string | null {
+  if (prev === undefined) return `+ "${item.content}" → ${item.status}`
+  if (prev.status === item.status) return null
+  return `"${item.content}" → ${item.status}`
+}
+
+export function renderTodoWriteTool(
+  prev: ReadonlyArray<TodoItem> | null,
+  current: ReadonlyArray<TodoItem>,
+): string {
+  const prevMap = new Map<string, TodoItem>()
+  if (prev !== null) for (const t of prev) prevMap.set(todoKey(t), t)
+  const currentKeys = new Set(current.map(todoKey))
+
+  const lines: string[] = []
+  for (const item of current) {
+    const line = diffLine(item, prevMap.get(todoKey(item)))
+    if (line !== null) lines.push(line)
+  }
+  if (prev !== null) {
+    for (const t of prev) {
+      if (!currentKeys.has(todoKey(t))) lines.push(`- "${t.content}"`)
+    }
+  }
+  if (lines.length === 0) return '<tool name="TodoWrite"/>'
+  return `<tool name="TodoWrite">\n${lines.join('; ')}\n</tool>`
+}
+
+const askUserQuestionInputSchema = z.object({
+  questions: z.array(z.object({ question: z.string().optional() })).optional(),
+})
+
+const askUserQuestionResultSchema = z.object({
+  answers: z.record(z.string(), z.string()),
+})
+
+function parseAnswers(content: string): Record<string, string> {
+  try {
+    const parsed = askUserQuestionResultSchema.safeParse(JSON.parse(content))
+    return parsed.success ? parsed.data.answers : {}
+  } catch {
+    return {}
+  }
+}
+
+export function renderAskUserQuestionTool(
+  use: ToolUseInput,
+  result: ToolResult | undefined,
+): string {
+  const input = askUserQuestionInputSchema.safeParse(use.input)
+  const questions = input.success ? (input.data.questions ?? []) : []
+  const answers = result === undefined ? {} : parseAnswers(result.content)
+  const lines = questions.map((q) => {
+    const text = q.question ?? ''
+    const ans = answers[text] ?? ''
+    return `Q: ${text} → A: ${ans}`.replace(/\s+$/, '')
+  })
+  return `<tool name="AskUserQuestion">\n${lines.join('\n')}\n</tool>`
+}
+
+const UNKNOWN_MAX_LINES = 200
+const UNKNOWN_HEAD_LINES = 40
+const UNKNOWN_TAIL_LINES = 40
+
+function unknownTruncate(text: string): string {
+  const trimmed = trimTrailingNewline(text)
+  if (countLines(trimmed) <= UNKNOWN_MAX_LINES) return trimmed
+  return headTailLines(trimmed, UNKNOWN_HEAD_LINES, UNKNOWN_TAIL_LINES)
+}
+
+function flatAttrProjection(input: Record<string, unknown>): string {
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(input)) {
+    if (typeof v === 'string') parts.push(`${k}="${attrEscape(v)}"`)
+    else if (typeof v === 'number' || typeof v === 'boolean')
+      parts.push(`${k}="${String(v)}"`)
+  }
+  return parts.join(' ')
+}
+
+export function renderUnknownTool(
+  use: ToolUseInput,
+  result: ToolResult | undefined,
+): string {
+  const attrs = flatAttrProjection(use.input)
+  const head = `<tool name="${attrEscape(use.name)}"${attrs.length > 0 ? ` ${attrs}` : ''}`
+  if (result === undefined) return `${head}/>`
+  const body = unknownTruncate(result.content)
+  return `${head}>\n${body}\n</tool>`
 }

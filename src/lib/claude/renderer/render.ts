@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 import {
   type ClaudeEntry,
   type ContentPart,
@@ -7,9 +9,20 @@ import {
   toolResultContent,
 } from './entries.ts'
 import { extractFrontmatter, frontmatterToYaml } from './frontmatter.ts'
+import { applyPostPasses } from './post-pass.ts'
 import {
+  renderAgentTool,
+  renderAskUserQuestionTool,
   renderBashTool,
   renderEditTool,
+  renderGlobTool,
+  renderGrepTool,
+  renderReadTool,
+  renderSkillTool,
+  renderTodoWriteTool,
+  renderUnknownTool,
+  renderWebFetchTool,
+  renderWebSearchTool,
   renderWriteTool,
   type ToolResult,
   type ToolUseInput,
@@ -25,28 +38,25 @@ const DROPPED_ENTRY_TYPES: ReadonlySet<string> = new Set([
   'ai-title',
 ])
 
-function attrEscape(s: string): string {
-  return s.replaceAll('"', '&quot;')
-}
-
-function asAttrValue(v: unknown): string | null {
-  if (typeof v === 'string') return v
-  if (typeof v === 'number') return String(v)
-  return null
-}
-
 function asFilePath(v: unknown): string {
   return typeof v === 'string' ? v : ''
 }
 
-function renderGenericTool(use: ToolUseInput): string {
-  const attrs: string[] = []
-  for (const [k, v] of Object.entries(use.input)) {
-    const s = asAttrValue(v)
-    if (s !== null) attrs.push(`${k}="${attrEscape(s)}"`)
+const todoItemSchema = z.object({
+  content: z.string(),
+  status: z.string(),
+})
+
+type TodoItem = z.infer<typeof todoItemSchema>
+
+function asTodos(v: unknown): TodoItem[] {
+  if (!Array.isArray(v)) return []
+  const out: TodoItem[] = []
+  for (const item of v) {
+    const parsed = todoItemSchema.safeParse(item)
+    if (parsed.success) out.push(parsed.data)
   }
-  const head = `<tool name="${attrEscape(use.name)}"`
-  return attrs.length > 0 ? `${head} ${attrs.join(' ')}/>` : `${head}/>`
+  return out
 }
 
 interface ToolUseRef {
@@ -130,25 +140,104 @@ function computeEditGroups(uses: ReadonlyArray<ToolUseRef>): {
   return { headGroup, absorbed }
 }
 
-function dispatchToolUse(
+interface RenderState {
+  results: ReadonlyMap<string, ToolResult>
+  editGroups: ReadonlyMap<string, ToolUseInput[]>
+  absorbed: ReadonlySet<string>
+  bodyDedup: Map<string, number>
+  lastTodos: TodoItem[] | null
+  currentTurn: number
+}
+
+function resultFor(
   use: ToolUseRef,
-  results: ReadonlyMap<string, ToolResult>,
-  editGroups: ReadonlyMap<string, ToolUseInput[]>,
-  absorbed: ReadonlySet<string>,
-): string {
+  state: RenderState,
+): ToolResult | undefined {
+  return use.id !== null ? state.results.get(use.id) : undefined
+}
+
+interface Reduced {
+  xml: string
+  // True when the body comes from a tool_result; eligible for cross-turn dedup.
+  resultBacked: boolean
+}
+
+function reduceToolUse(use: ToolUseRef, state: RenderState): Reduced {
+  const input: ToolUseInput = { name: use.name, input: use.input }
   if (use.name === 'Edit') {
-    if (use.id !== null && absorbed.has(use.id)) return ''
-    const group = use.id !== null ? editGroups.get(use.id) : undefined
-    return renderEditTool(group ?? [{ name: use.name, input: use.input }])
+    if (use.id !== null && state.absorbed.has(use.id)) {
+      return { xml: '', resultBacked: false }
+    }
+    const group = use.id !== null ? state.editGroups.get(use.id) : undefined
+    return { xml: renderEditTool(group ?? [input]), resultBacked: false }
   }
   if (use.name === 'Bash') {
-    const result = use.id !== null ? results.get(use.id) : undefined
-    return renderBashTool({ name: use.name, input: use.input }, result)
+    return {
+      xml: renderBashTool(input, resultFor(use, state)),
+      resultBacked: true,
+    }
   }
   if (use.name === 'Write') {
-    return renderWriteTool({ name: use.name, input: use.input })
+    return { xml: renderWriteTool(input), resultBacked: false }
   }
-  return renderGenericTool({ name: use.name, input: use.input })
+  if (use.name === 'Read')
+    return { xml: renderReadTool(input), resultBacked: false }
+  if (use.name === 'Glob')
+    return { xml: renderGlobTool(input), resultBacked: false }
+  if (use.name === 'Grep')
+    return { xml: renderGrepTool(input), resultBacked: false }
+  if (use.name === 'Skill')
+    return { xml: renderSkillTool(input), resultBacked: false }
+  if (use.name === 'WebFetch')
+    return { xml: renderWebFetchTool(input), resultBacked: false }
+  if (use.name === 'WebSearch')
+    return { xml: renderWebSearchTool(input), resultBacked: false }
+  if (use.name === 'Agent') {
+    return {
+      xml: renderAgentTool(input, resultFor(use, state)),
+      resultBacked: true,
+    }
+  }
+  if (use.name === 'AskUserQuestion') {
+    return {
+      xml: renderAskUserQuestionTool(input, resultFor(use, state)),
+      resultBacked: true,
+    }
+  }
+  if (use.name === 'TodoWrite') {
+    const current = asTodos(use.input.todos)
+    const xml = renderTodoWriteTool(state.lastTodos, current)
+    state.lastTodos = current
+    return { xml, resultBacked: false }
+  }
+  return {
+    xml: renderUnknownTool(input, resultFor(use, state)),
+    resultBacked: true,
+  }
+}
+
+function postProcessRendered(reduced: Reduced, state: RenderState): string {
+  const { xml, resultBacked } = reduced
+  if (xml.length === 0) return xml
+  if (xml.endsWith('/>')) return xml
+  const lines = xml.split('\n')
+  if (lines.length < 3) return xml
+  if (lines[lines.length - 1] !== '</tool>') return xml
+  const head = lines[0]
+  const body = lines.slice(1, -1).join('\n')
+  const cleaned = applyPostPasses(body)
+  if (resultBacked && cleaned.length > 0) {
+    const seenTurn = state.bodyDedup.get(cleaned)
+    if (seenTurn !== undefined) {
+      return `${head}\n(same output as turn ${seenTurn})\n</tool>`
+    }
+    state.bodyDedup.set(cleaned, state.currentTurn)
+  }
+  return `${head}\n${cleaned}\n</tool>`
+}
+
+function dispatchToolUse(use: ToolUseRef, state: RenderState): string {
+  return postProcessRendered(reduceToolUse(use, state), state)
 }
 
 function renderAssistantBody(
@@ -202,8 +291,15 @@ export function renderClaudeSession(jsonlText: string): string {
   const results = collectToolResults(entries)
   const uses = collectToolUses(entries)
   const { headGroup, absorbed } = computeEditGroups(uses)
-  const dispatch = (u: ToolUseRef): string =>
-    dispatchToolUse(u, results, headGroup, absorbed)
+  const state: RenderState = {
+    results,
+    editGroups: headGroup,
+    absorbed,
+    bodyDedup: new Map(),
+    lastTodos: null,
+    currentTurn: 0,
+  }
+  const dispatch = (u: ToolUseRef): string => dispatchToolUse(u, state)
 
   const turnable = entries.filter(
     (e) =>
@@ -216,6 +312,7 @@ export function renderClaudeSession(jsonlText: string): string {
   const bodyParts: string[] = []
   for (const e of turnable) {
     turnCount += 1
+    state.currentTurn = turnCount
     const role = e.type === 'user' ? 'user' : 'assistant'
     let t: string | null
     if (e.timestamp === undefined) {

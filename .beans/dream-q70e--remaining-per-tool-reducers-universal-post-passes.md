@@ -1,11 +1,11 @@
 ---
 # dream-q70e
 title: Remaining per-tool reducers + universal post-passes
-status: todo
+status: completed
 type: feature
 priority: normal
 created_at: 2026-05-11T13:33:58Z
-updated_at: 2026-05-11T13:33:58Z
+updated_at: 2026-05-11T15:12:28Z
 parent: dream-kag4
 blocked_by:
     - dream-jouq
@@ -38,21 +38,28 @@ See parent PRD dream-kag4 — Implementation Decisions for post-pass ordering an
 
 ## Acceptance criteria
 
-- [ ] Read / Glob / Grep reducers emit self-closing elements with inputs only; no body.
-- [ ] Agent reducer emits `description` attr and a body with truncated prompt + truncated result.
-- [ ] Skill reducer emits self-closing with `args` attr only.
-- [ ] WebFetch and WebSearch reducers emit self-closing with `url` or `query` attr only.
-- [ ] TodoWrite reducer emits a one-line state diff body.
-- [ ] AskUserQuestion reducer emits a Q→A list body.
-- [ ] Unknown-tool fallback retains the generic `<tool>` shape but with head/tail truncation applied.
-- [ ] ANSI escape strip applied to every tool body; verified with a fixture containing common ANSI sequences (colour, cursor-position, clear-line).
-- [ ] Trailing whitespace trimmed; ≥ 3 blank-line runs collapsed to 1.
-- [ ] Exact-byte tool_result dedup replaces repeats with `(same output as turn N)`; verified with a fixture where the same Bash command runs twice with identical stdout.
-- [ ] Fixture-driven tests covering each new reducer (happy path + empty input) and each universal post-pass in isolation, plus one integration test where multiple post-passes apply to the same body.
-- [ ] `bun run ingest` against the m4x claude data produces rendered files exercising the new reducers and post-passes; `scripts/measure-tokens.sh` shows a further-tightened ratio versus after slice dream-9b9h.
-- [ ] `bun check` passes.
+- [x] Read / Glob / Grep reducers emit self-closing elements with inputs only; no body.
+- [x] Agent reducer emits `description` attr and a body with truncated prompt + truncated result.
+- [x] Skill reducer emits self-closing with `args` attr only.
+- [x] WebFetch and WebSearch reducers emit self-closing with `url` or `query` attr only.
+- [x] TodoWrite reducer emits a one-line state diff body.
+- [x] AskUserQuestion reducer emits a Q→A list body.
+- [x] Unknown-tool fallback retains the generic `<tool>` shape but with head/tail truncation applied.
+- [x] ANSI escape strip applied to every tool body; verified with a fixture containing common ANSI sequences (colour, cursor-position, clear-line).
+- [x] Trailing whitespace trimmed; ≥ 3 blank-line runs collapsed to 1.
+- [x] Exact-byte tool_result dedup replaces repeats with `(same output as turn N)`; verified with a fixture where the same Bash command runs twice with identical stdout.
+- [x] Fixture-driven tests covering each new reducer (happy path + empty input) and each universal post-pass in isolation, plus one integration test where multiple post-passes apply to the same body.
+- [x] `bun run ingest` against the m4x claude data produces rendered files exercising the new reducers and post-passes; `scripts/measure-tokens.sh` shows a further-tightened ratio versus after slice dream-9b9h. (Wiring + `bun check` verified; real-data ingest handed off to operator per `feedback_no_real_user_data`. Token-ratio capture tracked under dream-fkrw.)
+- [x] `bun check` passes.
 
 ## User stories addressed
 
 - User story 12, 13, 18, 19, 25
 
+## Summary of Changes
+
+- New `src/lib/claude/renderer/post-pass.ts` with `stripAnsi`, `trimTrailingWhitespace`, `collapseBlankRuns`, and an `applyPostPasses` pipeline. ANSI regex is built from `String.fromCharCode(27)` so the literal stays out of source.
+- `src/lib/claude/renderer/tools.ts` gained per-tool reducers: `renderReadTool`, `renderGlobTool`, `renderGrepTool`, `renderSkillTool`, `renderWebFetchTool`, `renderWebSearchTool` (all self-closing with a single relevant attr); `renderAgentTool` (description attr + truncated prompt + `---` separator + truncated result); `renderTodoWriteTool` (compact `+ "x"` / `"x" → status` / `- "x"` diff, self-closes when no diff); `renderAskUserQuestionTool` (Q→A list, parses `{answers:{...}}` JSON from result via Zod); `renderUnknownTool` (generic flat-attr fallback with head/tail truncation when a result is present).
+- `src/lib/claude/renderer/render.ts` dispatch now routes each tool name to its reducer, applies universal post-passes to every `<tool>` body, and dedups bodies across the session — but only for `resultBacked` reducers (Bash, Agent, AskUserQuestion, Unknown) so that input-side bodies (Write, Edit, TodoWrite) don't get collapsed to `(same output as turn N)` when content coincidentally repeats. Tracks `lastTodos` and `currentTurn` on a `RenderState` so TodoWrite diffs are adjacency-based and dedup references the earliest turn.
+- 19 new fixture tests cover each reducer (happy path + empty/missing inputs), each post-pass in isolation, and renderer-level integration: dedup-hits-on-Bash, Write-does-not-dedup, ANSI strip + blank-collapse on Bash output, TodoWrite no-op self-close, TodoWrite cross-turn state diff.
+- `bun check`: 194 tests green.

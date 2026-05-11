@@ -88,7 +88,7 @@ describe('renderClaudeSession', () => {
       },
     )
     const body = bodyOf(renderClaudeSession(input))
-    expect(body).toContain('<tool name="Read" file_path="/x/y.ts"/>')
+    expect(body).toContain('<tool name="Read" path="/x/y.ts"/>')
   })
 
   test('drops assistant thinking blocks', () => {
@@ -424,6 +424,203 @@ describe('renderClaudeSession', () => {
     const body = bodyOf(renderClaudeSession(input))
     const editOpens = body.match(/<tool name="Edit"/g) ?? []
     expect(editOpens.length).toBe(2)
+  })
+
+  test('dedups identical tool_result bodies in same session', () => {
+    const callBash = (id: string, ts: string) => [
+      {
+        type: 'assistant',
+        sessionId: 'ses_1',
+        cwd: '/a',
+        timestamp: ts,
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id,
+              name: 'Bash',
+              input: { command: 'ls' },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        sessionId: 'ses_1',
+        cwd: '/a',
+        timestamp: ts,
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: id,
+              content: 'foo\nbar\nbaz',
+              is_error: false,
+            },
+          ],
+        },
+      },
+    ]
+    const input = jsonl(
+      ...callBash('t1', '2026-05-11T10:00:00Z'),
+      ...callBash('t2', '2026-05-11T10:00:02Z'),
+    )
+    const body = bodyOf(renderClaudeSession(input))
+    expect(body).toMatch(/<tool name="Bash" cmd="ls" exit="0">\nfoo\nbar\nbaz/)
+    expect(body).toContain('(same output as turn 1)')
+  })
+
+  test('Write tool bodies are not dedup-collapsed across turns', () => {
+    const writeCall = (id: string, ts: string, file: string) => ({
+      type: 'assistant',
+      sessionId: 'ses_1',
+      cwd: '/a',
+      timestamp: ts,
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id,
+            name: 'Write',
+            input: { file_path: file, content: 'export const x = 1\n' },
+          },
+        ],
+      },
+    })
+    const input = jsonl(
+      writeCall('w1', '2026-05-11T10:00:00Z', '/a.ts'),
+      writeCall('w2', '2026-05-11T10:00:01Z', '/b.ts'),
+    )
+    const body = bodyOf(renderClaudeSession(input))
+    expect(body).not.toContain('(same output as turn')
+    expect(body.match(/export const x = 1/g)?.length).toBe(2)
+  })
+
+  test('no-op TodoWrite self-closes', () => {
+    const todoCall = (id: string, ts: string) => ({
+      type: 'assistant',
+      sessionId: 'ses_1',
+      cwd: '/a',
+      timestamp: ts,
+      message: {
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool_use',
+            id,
+            name: 'TodoWrite',
+            input: { todos: [{ content: 'X', status: 'pending' }] },
+          },
+        ],
+      },
+    })
+    const input = jsonl(
+      todoCall('t1', '2026-05-11T10:00:00Z'),
+      todoCall('t2', '2026-05-11T10:00:01Z'),
+    )
+    const body = bodyOf(renderClaudeSession(input))
+    expect(body).toContain('<tool name="TodoWrite"/>')
+    expect(body).not.toContain('(same output as turn')
+  })
+
+  test('strips ANSI from tool bodies and collapses blank runs', () => {
+    const input = jsonl(
+      {
+        type: 'assistant',
+        sessionId: 'ses_1',
+        cwd: '/a',
+        timestamp: '2026-05-11T10:00:00Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'b1',
+              name: 'Bash',
+              input: { command: 'cargo test' },
+            },
+          ],
+        },
+      },
+      {
+        type: 'user',
+        sessionId: 'ses_1',
+        cwd: '/a',
+        timestamp: '2026-05-11T10:00:01Z',
+        message: {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 'b1',
+              content: '\x1b[31mfail\x1b[0m   \n\n\n\n\nend',
+              is_error: true,
+            },
+          ],
+        },
+      },
+    )
+    const body = bodyOf(renderClaudeSession(input))
+    expect(body).not.toContain('\x1b[')
+    expect(body).toContain('fail')
+    expect(body).toContain('end')
+    expect(body).not.toMatch(/\n\n\n/)
+  })
+
+  test('TodoWrite emits state diff between adjacent calls', () => {
+    const input = jsonl(
+      {
+        type: 'assistant',
+        sessionId: 'ses_1',
+        cwd: '/a',
+        timestamp: '2026-05-11T10:00:00Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tw1',
+              name: 'TodoWrite',
+              input: {
+                todos: [
+                  { content: 'a', status: 'pending' },
+                  { content: 'b', status: 'pending' },
+                ],
+              },
+            },
+          ],
+        },
+      },
+      {
+        type: 'assistant',
+        sessionId: 'ses_1',
+        cwd: '/a',
+        timestamp: '2026-05-11T10:00:01Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'tw2',
+              name: 'TodoWrite',
+              input: {
+                todos: [
+                  { content: 'a', status: 'in_progress' },
+                  { content: 'b', status: 'pending' },
+                ],
+              },
+            },
+          ],
+        },
+      },
+    )
+    const body = bodyOf(renderClaudeSession(input))
+    expect(body).toContain('<tool name="TodoWrite">')
+    expect(body).toContain('+ "a"')
+    expect(body).toContain('"a" → in_progress')
   })
 
   test('slash-command invocations surface as one-line [/skill args="..."]', () => {
