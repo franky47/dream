@@ -12,6 +12,7 @@ import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
 import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 import { ingestLocalOpencode } from '#src/ingest/sources/local-opencode'
 import { ingestSshClaude } from '#src/ingest/sources/ssh-claude'
+import { ingestSshOpencode } from '#src/ingest/sources/ssh-opencode'
 
 const INGEST_WINDOW_HOURS = 48
 
@@ -39,6 +40,7 @@ async function main(): Promise<number> {
     }),
     ingestLocalOpencode({ machine: cfg.machine }),
     ...cfg.remoteClaudeHosts.map((host) => ingestSshClaude({ host })),
+    ...cfg.remoteOpencodeHosts.map((host) => ingestSshOpencode({ host })),
     ...cfg.firefoxProfiles.map((name) =>
       ingestLocalFirefox({
         machine: cfg.machine,

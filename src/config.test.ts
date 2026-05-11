@@ -58,6 +58,30 @@ describe('parseConfig', () => {
     expect(result.remoteClaudeHosts).toEqual(['echo', 'alpha'])
   })
 
+  test('remoteOpencodeHosts is empty when DREAM_REMOTE_OPENCODE_HOSTS is unset', () => {
+    const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
+    if (result instanceof Error) throw result
+    expect(result.remoteOpencodeHosts).toEqual([])
+  })
+
+  test('parses comma-separated DREAM_REMOTE_OPENCODE_HOSTS', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_OPENCODE_HOSTS: 'hex,m4-pro',
+    })
+    if (result instanceof Error) throw result
+    expect(result.remoteOpencodeHosts).toEqual(['hex', 'm4-pro'])
+  })
+
+  test('trims whitespace and ignores empty entries in DREAM_REMOTE_OPENCODE_HOSTS', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_OPENCODE_HOSTS: ' hex , , m4-pro ,',
+    })
+    if (result instanceof Error) throw result
+    expect(result.remoteOpencodeHosts).toEqual(['hex', 'm4-pro'])
+  })
+
   test('firefoxProfiles is empty when DREAM_FIREFOX_PROFILES is unset', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
     if (result instanceof Error) throw result

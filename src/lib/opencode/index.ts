@@ -1,4 +1,4 @@
-export { projectRows } from '#lib/opencode/projection'
+export { buildProjectionSql, projectRows } from '#lib/opencode/projection'
 export {
   splitJsonlToSessionFiles,
   type SplitterMetrics,

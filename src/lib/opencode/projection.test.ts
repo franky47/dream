@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import { z } from 'zod'
 
-import { projectRows } from '#lib/opencode/projection'
+import { buildProjectionSql, projectRows } from '#lib/opencode/projection'
 
 const rowSchema = z.record(z.string(), z.unknown())
 function parseRows(rows: ReadonlyArray<string>): Record<string, unknown>[] {
@@ -179,6 +179,39 @@ beforeEach(() => {
 
 afterEach(() => {
   rmSync(workDir, { recursive: true, force: true })
+})
+
+describe('buildProjectionSql', () => {
+  test('inlines sinceMs as a literal integer at every filter site', () => {
+    const sql = buildProjectionSql({ sinceMs: 1_234_567 })
+    expect(sql).toContain('time_updated > 1234567')
+    expect(sql).not.toContain('?')
+  })
+
+  test('executes against a database without bound parameters', () => {
+    const db = openFreshDb()
+    insertProject(db, { id: 'prj_a', worktree: '/repo', name: 'dream' })
+    insertWorkspace(db, {
+      id: 'wks_a',
+      projectId: 'prj_a',
+      branch: 'main',
+      directory: '/repo',
+    })
+    insertSession(db, {
+      id: 'ses_1',
+      projectId: 'prj_a',
+      workspaceId: 'wks_a',
+      timeCreated: 5_000,
+      timeUpdated: 5_000,
+    })
+    const sql = buildProjectionSql({ sinceMs: 0 })
+    const rows = db
+      .query<{ row: string }, []>(sql)
+      .all()
+      .map((r) => r.row)
+    expect(rows).toHaveLength(1)
+    db.close()
+  })
 })
 
 describe('projectRows', () => {
