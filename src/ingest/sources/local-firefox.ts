@@ -30,6 +30,14 @@ const placeRowSchema = z.object({
 })
 const placeRowsSchema = z.array(placeRowSchema)
 
+const bookmarkRowSchema = z.object({
+  bookmarked_at: z.string(),
+  url: z.string(),
+  title: z.string(),
+  guid: z.string(),
+})
+const bookmarkRowsSchema = z.array(bookmarkRowSchema)
+
 function localDateStamp(d: Date): string {
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
@@ -79,14 +87,9 @@ function snapshotPlaces(profileDir: string): string {
   return target
 }
 
-function readPlaces(snapshotPath: string, since: Date): unknown {
+function readPlaces(db: Database, since: Date): unknown {
   try {
-    const db = new Database(snapshotPath, { readonly: true })
-    try {
-      return db.query(QUERY).all({ $sinceMicros: since.getTime() * 1000 })
-    } finally {
-      db.close()
-    }
+    return db.query(QUERY_PLACES).all({ $sinceMicros: since.getTime() * 1000 })
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause)
     throw new LocalFirefoxFailure({
@@ -97,7 +100,20 @@ function readPlaces(snapshotPath: string, since: Date): unknown {
   }
 }
 
-const QUERY = `
+function readBookmarks(db: Database): unknown {
+  try {
+    return db.query(QUERY_BOOKMARKS).all()
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new LocalFirefoxFailure({
+      stage: 'bookmarks',
+      reason: `reading moz_bookmarks: ${detail}`,
+      cause,
+    })
+  }
+}
+
+const QUERY_PLACES = `
   WITH cleaned AS (
     SELECT
       last_visit_date,
@@ -123,6 +139,22 @@ const QUERY = `
   FROM cleaned
   GROUP BY url
   ORDER BY visited DESC
+`
+
+// Other Bookmarks (macOS Cmd+D default) and Mobile Bookmarks (iOS share-sheet
+// default) are the two-keystroke / two-tap promotion surfaces.
+const QUERY_BOOKMARKS = `
+  SELECT
+    datetime(b.dateAdded / 1000000, 'unixepoch', 'localtime') AS bookmarked_at,
+    p.url AS url,
+    COALESCE(NULLIF(b.title, ''), NULLIF(p.title, ''), p.url) AS title,
+    b.guid AS guid
+  FROM moz_bookmarks b
+  JOIN moz_places p ON p.id = b.fk
+  JOIN moz_bookmarks f ON f.id = b.parent
+  WHERE b.type = 1
+    AND f.guid IN ('unfiled_____', 'mobile______')
+  ORDER BY b.dateAdded DESC
 `
 
 function loadBlocklist(blocklistPath: string | undefined): string[] {
@@ -166,19 +198,39 @@ export function ingestLocalFirefox(opts: {
     pull: async ({ outDir, since }) => {
       const blocklist = loadBlocklist(opts.blocklistPath)
       const snapshotPath = snapshotPlaces(opts.profileDir)
-      let raw: unknown
+      let placesRaw: unknown
+      let bookmarksRaw: unknown
       try {
-        raw = readPlaces(snapshotPath, since)
+        let db: Database
+        try {
+          db = new Database(snapshotPath, { readonly: true })
+        } catch (cause) {
+          const detail = cause instanceof Error ? cause.message : String(cause)
+          throw new LocalFirefoxFailure({
+            stage: 'open',
+            reason: `opening snapshot: ${detail}`,
+            cause,
+          })
+        }
+        try {
+          placesRaw = readPlaces(db, since)
+          bookmarksRaw = readBookmarks(db)
+        } finally {
+          db.close()
+        }
       } finally {
         rmSync(path.dirname(snapshotPath), { recursive: true, force: true })
       }
-      const allRows = placeRowsSchema.parse(raw)
+      const allRows = placeRowsSchema.parse(placesRaw)
       const rows = allRows.filter((r) => !isBlocked(r.url, blocklist))
       const blocklistFiltered = allRows.length - rows.length
+      const bookmarkRows = bookmarkRowsSchema.parse(bookmarksRaw)
 
-      const lines = ['visited,url,title,visit_count,frecency,typed']
+      const stamp = localDateStamp(new Date())
+
+      const historyLines = ['visited,url,title,visit_count,frecency,typed']
       for (const r of rows) {
-        lines.push(
+        historyLines.push(
           [
             csvField(r.visited),
             csvField(r.url),
@@ -189,18 +241,30 @@ export function ingestLocalFirefox(opts: {
           ].join(','),
         )
       }
-      const csv = lines.join('\n') + '\n'
-      const outPath = path.join(
-        outDir,
-        `${localDateStamp(new Date())}.history.csv`,
-      )
-      await Bun.write(outPath, csv)
-      const bytes = statSync(outPath).size
+      const historyPath = path.join(outDir, `${stamp}.history.csv`)
+      await Bun.write(historyPath, historyLines.join('\n') + '\n')
+
+      const bookmarksLines = ['bookmarked_at,url,title,guid']
+      for (const b of bookmarkRows) {
+        bookmarksLines.push(
+          [
+            csvField(b.bookmarked_at),
+            csvField(b.url),
+            csvField(b.title),
+            csvField(b.guid),
+          ].join(','),
+        )
+      }
+      const bookmarksPath = path.join(outDir, `${stamp}.bookmarks.csv`)
+      await Bun.write(bookmarksPath, bookmarksLines.join('\n') + '\n')
+
+      const bytes = statSync(historyPath).size + statSync(bookmarksPath).size
       return {
-        files_pulled: 1,
+        files_pulled: 2,
         bytes,
         rows: rows.length,
         blocklist_filtered: blocklistFiltered,
+        bookmark_rows: bookmarkRows.length,
       }
     },
   }
