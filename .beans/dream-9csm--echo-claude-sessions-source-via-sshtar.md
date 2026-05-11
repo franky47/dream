@@ -1,14 +1,14 @@
 ---
 # dream-9csm
 title: Echo claude-sessions source via ssh+tar
-status: in-progress
+status: completed
 type: feature
 priority: normal
 created_at: 2026-05-10T12:33:01Z
-updated_at: 2026-05-10T13:36:04Z
+updated_at: 2026-05-11T08:53:33Z
 parent: dream-xh9u
 blocked_by:
-  - dream-b7nn
+    - dream-b7nn
 ---
 
 ## What to build
@@ -30,7 +30,7 @@ See parent `dream-xh9u` for the source contract, the run-log shape, and the rati
 - [x] Returns `{ files_pulled, bytes }` on success (counted by walking outDir post-extract; orchestrator adds `duration_ms`)
 - [x] Sources are added to the orchestrator's source list in `src/ingest/main.ts` from `cfg.remoteClaudeSessionsHosts` (one source per host)
 - [x] Smoke-test the failure path: with `DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS=invalid.example,another.bad`, the run completes, m4x source still produces data, and both remote entries in the run log show `status: "error"` with `ssh: Could not resolve hostname …`. Verified.
-- [ ] **Pending user verification:** ok-path smoke test with a real reachable host that has a recent session. Run `DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS=echo bun run ingest`; verify `data/raw/echo/claude-sessions/` populated and `data/raw/_meta/*.json` has the echo entry with `status: "ok"`.
+- [x] **Pending user verification:** ok-path smoke test with a real reachable host that has a recent session. Run `DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS=echo bun run ingest`; verify `data/raw/echo/claude-sessions/` populated and `data/raw/_meta/*.json` has the echo entry with `status: "ok"`. Verified by user.
 - [x] `bun run check` passes (29 tests across 5 files)
 - [x] **Tests added** for `ssh-claude-sessions.ts`: pipeline-level tests on `runSshTarPipeline` exercising real `Bun.spawn` + real local `tar` with a fake upstream (`sh -c` instead of `ssh`). Cases: extract+metrics, empty-tar success, upstream non-zero exit, invalid-gzip tar failure, both-streams-fail stderr capture.
 
