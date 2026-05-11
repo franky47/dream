@@ -32,6 +32,9 @@ type PlaceRow = {
   url: string
   title: string | null
   lastVisit: Date
+  visitCount?: number
+  frecency?: number
+  typed?: number
 }
 
 function createPlacesDb(rows: ReadonlyArray<PlaceRow>): Database {
@@ -41,14 +44,24 @@ function createPlacesDb(rows: ReadonlyArray<PlaceRow>): Database {
       id INTEGER PRIMARY KEY,
       url TEXT NOT NULL,
       title TEXT,
-      last_visit_date INTEGER
+      last_visit_date INTEGER,
+      visit_count INTEGER NOT NULL DEFAULT 0,
+      frecency INTEGER NOT NULL DEFAULT -1,
+      typed INTEGER NOT NULL DEFAULT 0
     );
   `)
   const insert = db.prepare(
-    'INSERT INTO moz_places (url, title, last_visit_date) VALUES (?, ?, ?)',
+    'INSERT INTO moz_places (url, title, last_visit_date, visit_count, frecency, typed) VALUES (?, ?, ?, ?, ?, ?)',
   )
   for (const r of rows) {
-    insert.run(r.url, r.title, microsSinceEpoch(r.lastVisit))
+    insert.run(
+      r.url,
+      r.title,
+      microsSinceEpoch(r.lastVisit),
+      r.visitCount ?? 1,
+      r.frecency ?? 100,
+      r.typed ?? 0,
+    )
   }
   return db
 }
@@ -98,15 +111,81 @@ describe('ingestLocalFirefox', () => {
 
     const files = readdirSync(outDir)
     expect(files).toHaveLength(1)
-    expect(files[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.csv$/)
+    expect(files[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.history\.csv$/)
     const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
     const lines = csv.trim().split('\n')
-    expect(lines[0]).toBe('visited,url,title')
+    expect(lines[0]).toBe('visited,url,title,visit_count,frecency,typed')
     expect(lines).toHaveLength(2)
     expect(lines[1]).toContain('https://a.example/')
     expect(lines[1]).toContain('A')
     expect(metrics.rows).toBe(1)
     expect(metrics.files_pulled).toBe(1)
+  })
+
+  test('surfaces visit_count, frecency, typed columns from moz_places', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://typed.example/',
+        title: 'typed url',
+        lastVisit: new Date('2026-05-09T12:00:00Z'),
+        visitCount: 17,
+        frecency: 4321,
+        typed: 1,
+      },
+    ])
+    db.close()
+
+    const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+    await src.pull({ outDir, since: SINCE })
+
+    const files = readdirSync(outDir)
+    const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
+    const lines = csv.trim().split('\n')
+    expect(lines).toHaveLength(2)
+    const cells = lines[1]!.split(',')
+    expect(cells[1]).toBe('https://typed.example/')
+    expect(cells[2]).toBe('typed url')
+    expect(cells[3]).toBe('17')
+    expect(cells[4]).toBe('4321')
+    expect(cells[5]).toBe('1')
+  })
+
+  test('aggregates visit_count across query-string variants grouped under one url', async () => {
+    const db = createPlacesDb([
+      {
+        url: 'https://agg.example/page?a=1',
+        title: 'variant a',
+        lastVisit: new Date('2026-05-09T08:00:00Z'),
+        visitCount: 3,
+        frecency: 100,
+        typed: 0,
+      },
+      {
+        url: 'https://agg.example/page?b=2',
+        title: 'variant b',
+        lastVisit: new Date('2026-05-09T09:00:00Z'),
+        visitCount: 5,
+        frecency: 900,
+        typed: 1,
+      },
+    ])
+    db.close()
+
+    const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    const files = readdirSync(outDir)
+    const csv = readFileSync(path.join(outDir, files[0]!), 'utf-8')
+    const lines = csv.trim().split('\n')
+    expect(metrics.rows).toBe(1)
+    const cells = lines[1]!.split(',')
+    expect(cells[1]).toBe('https://agg.example/page')
+    // visit_count: SUM across variants
+    expect(cells[3]).toBe('8')
+    // frecency: MAX across variants
+    expect(cells[4]).toBe('900')
+    // typed: MAX (any variant typed)
+    expect(cells[5]).toBe('1')
   })
 
   test('excludes URLs visited before the since cutoff', async () => {
@@ -455,11 +534,14 @@ describe('ingestLocalFirefox', () => {
     db.run('PRAGMA locking_mode=EXCLUSIVE')
     // force the exclusive lock to actually be acquired by performing a write
     db.prepare(
-      'INSERT INTO moz_places (url, title, last_visit_date) VALUES (?, ?, ?)',
+      'INSERT INTO moz_places (url, title, last_visit_date, visit_count, frecency, typed) VALUES (?, ?, ?, ?, ?, ?)',
     ).run(
       'https://force-lock.example/',
       'forced',
       new Date('2026-05-09T13:00:00Z').getTime() * 1000,
+      1,
+      100,
+      0,
     )
     try {
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })

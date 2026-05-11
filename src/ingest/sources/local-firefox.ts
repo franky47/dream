@@ -24,6 +24,9 @@ const placeRowSchema = z.object({
   visited: z.string(),
   url: z.string(),
   title: z.string(),
+  visit_count: z.number().int().nonnegative(),
+  frecency: z.number().int(),
+  typed: z.number().int().nonnegative(),
 })
 const placeRowsSchema = z.array(placeRowSchema)
 
@@ -99,6 +102,9 @@ const QUERY = `
     SELECT
       last_visit_date,
       title,
+      visit_count,
+      frecency,
+      typed,
       CASE
         WHEN INSTR(url, '?') > 0 THEN SUBSTR(url, 1, INSTR(url, '?') - 1)
         WHEN INSTR(url, '#') > 0 THEN SUBSTR(url, 1, INSTR(url, '#') - 1)
@@ -110,7 +116,10 @@ const QUERY = `
   SELECT
     datetime(MAX(last_visit_date) / 1000000, 'unixepoch', 'localtime') AS visited,
     url,
-    COALESCE(title, '') AS title
+    COALESCE(title, '') AS title,
+    COALESCE(SUM(visit_count), 0) AS visit_count,
+    COALESCE(MAX(frecency), 0) AS frecency,
+    COALESCE(MAX(typed), 0) AS typed
   FROM cleaned
   GROUP BY url
   ORDER BY visited DESC
@@ -167,14 +176,24 @@ export function ingestLocalFirefox(opts: {
       const rows = allRows.filter((r) => !isBlocked(r.url, blocklist))
       const blocklistFiltered = allRows.length - rows.length
 
-      const lines = ['visited,url,title']
+      const lines = ['visited,url,title,visit_count,frecency,typed']
       for (const r of rows) {
         lines.push(
-          `${csvField(r.visited)},${csvField(r.url)},${csvField(r.title)}`,
+          [
+            csvField(r.visited),
+            csvField(r.url),
+            csvField(r.title),
+            String(r.visit_count),
+            String(r.frecency),
+            String(r.typed),
+          ].join(','),
         )
       }
       const csv = lines.join('\n') + '\n'
-      const outPath = path.join(outDir, `${localDateStamp(new Date())}.csv`)
+      const outPath = path.join(
+        outDir,
+        `${localDateStamp(new Date())}.history.csv`,
+      )
       await Bun.write(outPath, csv)
       const bytes = statSync(outPath).size
       return {
