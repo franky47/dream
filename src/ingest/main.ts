@@ -10,6 +10,7 @@ import { buildRunLog } from '#src/ingest/log'
 import { run, type Source } from '#src/ingest/orchestrator'
 import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
 import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
+import { ingestLocalOpencode } from '#src/ingest/sources/local-opencode'
 import { ingestSshClaude } from '#src/ingest/sources/ssh-claude'
 
 const INGEST_WINDOW_HOURS = 48
@@ -36,6 +37,7 @@ async function main(): Promise<number> {
       machine: cfg.machine,
       sourceDir: path.join(homedir(), '.claude', 'projects'),
     }),
+    ingestLocalOpencode({ machine: cfg.machine }),
     ...cfg.remoteClaudeHosts.map((host) => ingestSshClaude({ host })),
     ...cfg.firefoxProfiles.map((name) =>
       ingestLocalFirefox({

@@ -2,7 +2,9 @@
   "name": "dream",
   "private": true,
   "imports": {
-    "#src/*": "./src/*.ts"
+    "#src/*": "./src/*.ts",
+    "#lib/opencode": "./src/lib/opencode/index.ts",
+    "#lib/*": "./src/lib/*.ts"
   },
   "scripts": {
     "check": "bun run fmt:check && bun run lint && bun run typecheck && bun run test && bun run knip",

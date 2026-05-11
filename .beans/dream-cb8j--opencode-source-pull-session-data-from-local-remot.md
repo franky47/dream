@@ -63,6 +63,7 @@ Incremental semantics match the existing claude source: any session whose `time_
 ## Implementation Decisions
 
 **New library module — `src/lib/opencode/`** (first occupant of `src/lib/`):
+
 - `projection.ts` — owns the SQL string + a typed contract for the three row kinds (`session`, `message`, `part`). One function takes `{ sinceMs }` and returns `{ sql, params }`. The query unions over `session` (joined to `project` and `workspace` and denormalised onto the row), `message`, and `part` filtered to sessions where `parent_id IS NULL` and `time_updated > ?`. Output is wrapped in `json_object(…)` so the stream is jsonl regardless of how the query runs. `ORDER BY session_id, time_created, type_rank, id` with `type_rank = CASE type WHEN 'session' THEN 0 WHEN 'message' THEN 1 WHEN 'part' THEN 2 END`.
 - `splitter.ts` — pure function from an async line iterator + `outDir` to a metrics object. Watches each row's `sessionId` field; on change, closes the previous file handle and opens the next. Counts `sessions_pulled` / `messages_pulled` / `parts_pulled` / `bytes`. Tolerates blank/partial last lines.
 - `index.ts` — barrel re-export.
@@ -70,15 +71,18 @@ Incremental semantics match the existing claude source: any session whose `time_
 **New import alias** — `package.json` `imports` gains `#lib/*: ./src/lib/*.ts`. The existing `#src/*` stays.
 
 **Modified modules:**
+
 - `src/config.ts` — adds `DREAM_REMOTE_OPENCODE_HOSTS` to the Zod schema (CSV, default empty) and exposes `remoteOpencodeHosts: string[]` on the `Config` type. Test additions mirror the existing `remoteClaudeHosts` coverage.
 - `src/ingest/main.ts` — instantiates `ingestLocalOpencode({ machine: cfg.machine, dbPath: <default> })` and `cfg.remoteOpencodeHosts.map((host) => ingestSshOpencode({ host }))`. Pure wiring.
 - `.env.example` — adds `DREAM_REMOTE_OPENCODE_HOSTS=` documented placeholder.
 
 **New source modules:**
+
 - `src/ingest/sources/local-opencode.ts` — opens `bun:sqlite` with `{ readonly: true }`, calls the projection, iterates rows, hands the line stream to the splitter, returns the `Source`. Source name: `'opencode'`.
 - `src/ingest/sources/ssh-opencode.ts` — `Bun.spawn(['ssh', '-o', 'BatchMode=yes', host, "sqlite3 -readonly ~/.local/share/opencode/opencode.db \"<sql>\""])`, pipes stdout into the splitter as a line iterator, captures stderr, surfaces failure via a tagged error following the `SshSourceFailure` pattern in `ssh-claude.ts`. `Bun.spawn` is used directly (not `Bun.$`) per the `Bun.$ ignores pipefail` project memory.
 
 **Row shape contract** (lives in `src/lib/opencode/projection.ts`):
+
 - Session header: `{ type: 'session', id, sessionId, parentId, timestamp, title, directory, version, project: { id, worktree, vcs, name }, workspace: { id, type, name, branch, directory } }`. Emitted as the first row per session.
 - Message: `{ type: 'message', id, sessionId, parentId, timestamp, …spread of message.data fields (role, model, mode, agent, cost, tokens, finish, etc.) }`.
 - Part: `{ type: 'part', id, sessionId, messageId, timestamp, …spread of part.data fields including the inner part `type` (`text`/`tool`/`reasoning`/`step-start`/`step-finish`/`patch`/`file`/etc.) }`.
@@ -86,6 +90,7 @@ Incremental semantics match the existing claude source: any session whose `time_
 `timestamp` is the row's `time_created` rendered as ISO-8601 UTC. The outer `type` (`session|message|part`) and the inner `data.type` (for parts) are intentionally separate fields — outer drives splitter routing, inner survives downstream as the granular event kind.
 
 **Filter rules** (locked into the SQL):
+
 - `session.parent_id IS NULL` (root sessions only — subagents excluded).
 - `session.time_updated > :sinceMs` (incremental cursor).
 - Messages and parts pulled only for sessions matching the above (via an `IN (SELECT id FROM session WHERE …)` subquery on `session_id`).
@@ -93,6 +98,7 @@ Incremental semantics match the existing claude source: any session whose `time_
 **Tables touched, deliberately:** `session`, `message`, `part`, `project`, `workspace`. **Tables skipped, deliberately:** `todo`, `session_entry`, `event`, `event_sequence`, `permission`, `session_share`, all auth/account tables. (`session_entry` is empty in practice; the rest are out of scope for v1 — see Out of Scope.)
 
 **Concurrency / safety:**
+
 - Local: db opened read-only; sqlite gives a consistent snapshot for the single combined SELECT. A running OpenCode that writes during the query is invisible past the snapshot point.
 - SSH: `sqlite3 -readonly` enforces the same invariant on the remote.
 
@@ -102,7 +108,7 @@ Incremental semantics match the existing claude source: any session whose `time_
 
 ## Testing Decisions
 
-**What makes a good test here:** asserts on the external behaviour of each module's contract, not on its internals. For the projection, that means asserting the *rows produced* by running the query against a synthetic db — not the SQL string itself. For the splitter, that means asserting the *files written* and *metrics returned* — not internal buffer state. For the source factories, that means asserting the `Source` labels and the end-to-end pull output against a synthetic db / fake argv.
+**What makes a good test here:** asserts on the external behaviour of each module's contract, not on its internals. For the projection, that means asserting the _rows produced_ by running the query against a synthetic db — not the SQL string itself. For the splitter, that means asserting the _files written_ and _metrics returned_ — not internal buffer state. For the source factories, that means asserting the `Source` labels and the end-to-end pull output against a synthetic db / fake argv.
 
 **Modules tested (all with sibling `*.test.ts` files):**
 
@@ -115,6 +121,7 @@ Incremental semantics match the existing claude source: any session whose `time_
 4. `src/ingest/sources/ssh-opencode.test.ts` — same `upstream`-argv seam as `ssh-claude.test.ts`: the factory exposes an internal entry point that accepts a custom `upstream` argv; the test passes argv that runs `sqlite3` locally against the synthetic db (or even `cat` of a pre-rendered jsonl fixture) instead of real ssh. Asserts ok path, error path (non-zero exit → tagged error), and metrics.
 
 **Prior art in the codebase:**
+
 - `src/ingest/sources/local-firefox.test.ts` — synthetic sqlite fixture, smallest-possible schema subset, per-test tmp dir.
 - `src/ingest/sources/ssh-claude.test.ts` — fake `upstream` argv pointing at local commands, asserts both success and failure paths.
 - `src/ingest/sources/local-claude.test.ts` — per-test tmpdir arrange, sibling test file.
