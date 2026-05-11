@@ -1,11 +1,11 @@
 ---
 # dream-kag4
 title: 'Claude renderer: deterministic JSONL → token-efficient markdown'
-status: todo
+status: completed
 type: epic
 priority: high
 created_at: 2026-05-11T13:03:41Z
-updated_at: 2026-05-11T13:03:41Z
+updated_at: 2026-05-11T15:19:56Z
 ---
 
 ## Problem Statement
