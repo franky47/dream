@@ -69,6 +69,71 @@ function readBookmarksCsv(): string {
   return readFileSync(path.join(outDir, file), 'utf-8')
 }
 
+function readOpenTabsCsv(): string {
+  const files = readdirSync(outDir)
+  const file = files.find((f) => f.endsWith('.open-tabs.csv'))
+  if (!file) throw new Error('no open-tabs csv')
+  return readFileSync(path.join(outDir, file), 'utf-8')
+}
+
+type SyncedTabEntry = {
+  title?: string
+  urlHistory: string[]
+  lastUsed: number
+}
+
+type SyncedTabRow = {
+  guid: string
+  clientName: string | null
+  lastModified: Date
+  tabs: SyncedTabEntry[]
+}
+
+type RemoteClient = {
+  guid: string
+  deviceName: string
+}
+
+function createSyncedTabsDb(
+  rows: ReadonlyArray<SyncedTabRow>,
+  remoteClients: ReadonlyArray<RemoteClient> = [],
+): Database {
+  const syncedTabsPath = path.join(profileDir, 'synced-tabs.db')
+  const db = new Database(syncedTabsPath)
+  db.exec(`
+    CREATE TABLE tabs (
+      guid TEXT PRIMARY KEY,
+      record TEXT NOT NULL,
+      last_modified INTEGER NOT NULL
+    );
+    CREATE TABLE moz_meta (
+      key TEXT PRIMARY KEY,
+      value
+    );
+  `)
+  const insertTab = db.prepare(
+    'INSERT INTO tabs (guid, record, last_modified) VALUES (?, ?, ?)',
+  )
+  for (const r of rows) {
+    const record = JSON.stringify({
+      clientName: r.clientName,
+      tabs: r.tabs,
+    })
+    insertTab.run(r.guid, record, r.lastModified.getTime())
+  }
+  if (remoteClients.length > 0) {
+    const map: Record<string, { device_name: string }> = {}
+    for (const c of remoteClients) {
+      map[c.guid] = { device_name: c.deviceName }
+    }
+    db.prepare('INSERT INTO moz_meta (key, value) VALUES (?, ?)').run(
+      'remote_clients',
+      JSON.stringify(map),
+    )
+  }
+  return db
+}
+
 function createPlacesDb(rows: ReadonlyArray<PlaceRow>): Database {
   const db = new Database(placesPath)
   db.exec(`
@@ -186,9 +251,10 @@ describe('ingestLocalFirefox', () => {
     const metrics = await src.pull({ outDir, since: SINCE })
 
     const files = readdirSync(outDir).sort()
-    expect(files).toHaveLength(2)
+    expect(files).toHaveLength(3)
     expect(files[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.bookmarks\.csv$/)
     expect(files[1]).toMatch(/^\d{4}-\d{2}-\d{2}\.history\.csv$/)
+    expect(files[2]).toMatch(/^\d{4}-\d{2}-\d{2}\.open-tabs\.csv$/)
     const csv = readHistoryCsv()
     const lines = csv.trim().split('\n')
     expect(lines[0]).toBe('visited,url,title,visit_count,frecency,typed')
@@ -196,7 +262,7 @@ describe('ingestLocalFirefox', () => {
     expect(lines[1]).toContain('https://a.example/')
     expect(lines[1]).toContain('A')
     expect(metrics.rows).toBe(1)
-    expect(metrics.files_pulled).toBe(2)
+    expect(metrics.files_pulled).toBe(3)
   })
 
   test('surfaces visit_count, frecency, typed columns from moz_places', async () => {
@@ -630,7 +696,7 @@ describe('ingestLocalFirefox', () => {
 
       const csv = readBookmarksCsv()
       expect(csv.trim()).toBe('bookmarked_at,url,title,guid')
-      expect(metrics.files_pulled).toBe(2)
+      expect(metrics.files_pulled).toBe(3)
     })
 
     test('surfaces a bookmark under Other Bookmarks (unfiled_____)', async () => {
@@ -870,6 +936,378 @@ describe('ingestLocalFirefox', () => {
         name: 'LocalFirefoxFailure',
         stage: 'bookmarks',
       })
+    })
+  })
+
+  describe('open-tabs CSV', () => {
+    const HOUR_MS = 60 * 60 * 1000
+    const DAY_MS = 24 * HOUR_MS
+
+    test('emits header-only csv when synced-tabs.db is missing entirely', async () => {
+      const db = createPlacesDb([])
+      db.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      const metrics = await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv.trim()).toBe('last_used,url,title,device,pinned')
+      expect(metrics.files_pulled).toBe(3)
+    })
+
+    test('emits header-only csv when the tabs table is empty', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv.trim()).toBe('last_used,url,title,device,pinned')
+    })
+
+    test('surfaces tabs from one device with clientName as device label', async () => {
+      const recentMs = Date.now() - HOUR_MS
+      const lastUsed = Math.floor(recentMs / 1000)
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'iphoneguid01',
+          clientName: 'François iPhone',
+          lastModified: new Date(recentMs),
+          tabs: [
+            {
+              title: 'Long read',
+              urlHistory: ['https://example.com/long-read'],
+              lastUsed,
+            },
+          ],
+        },
+      ])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      const lines = csv.trim().split('\n')
+      expect(lines[0]).toBe('last_used,url,title,device,pinned')
+      expect(lines).toHaveLength(2)
+      const cells = lines[1]!.split(',')
+      expect(cells[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+      expect(cells[1]).toBe('https://example.com/long-read')
+      expect(cells[2]).toBe('Long read')
+      expect(cells[3]).toBe('François iPhone')
+      expect(cells[4]).toBe('')
+    })
+
+    test('device falls back to moz_meta.remote_clients when clientName is null', async () => {
+      const recentMs = Date.now() - HOUR_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb(
+        [
+          {
+            guid: 'devguid00001',
+            clientName: null,
+            lastModified: new Date(recentMs),
+            tabs: [
+              {
+                title: 't',
+                urlHistory: ['https://example.com/'],
+                lastUsed: Math.floor(recentMs / 1000),
+              },
+            ],
+          },
+        ],
+        [{ guid: 'devguid00001', deviceName: 'Hex Desktop' }],
+      )
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('Hex Desktop')
+    })
+
+    test('device falls back to guid when both clientName and remote_clients are missing', async () => {
+      const recentMs = Date.now() - HOUR_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'orphanguid00',
+          clientName: null,
+          lastModified: new Date(recentMs),
+          tabs: [
+            {
+              title: 't',
+              urlHistory: ['https://example.com/'],
+              lastUsed: Math.floor(recentMs / 1000),
+            },
+          ],
+        },
+      ])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      const lines = csv.trim().split('\n')
+      const cells = lines[1]!.split(',')
+      expect(cells[3]).toBe('orphanguid00')
+    })
+
+    test('drops rows whose last_modified is more than 60 days ago', async () => {
+      const recentMs = Date.now() - HOUR_MS
+      const ancientMs = Date.now() - 100 * DAY_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'ancientguid1',
+          clientName: 'Old Mac',
+          lastModified: new Date(ancientMs),
+          tabs: [
+            {
+              title: 'old',
+              urlHistory: ['https://ancient.example/'],
+              lastUsed: Math.floor(ancientMs / 1000),
+            },
+          ],
+        },
+        {
+          guid: 'recentguid01',
+          clientName: 'Current Mac',
+          lastModified: new Date(recentMs),
+          tabs: [
+            {
+              title: 'now',
+              urlHistory: ['https://current.example/'],
+              lastUsed: Math.floor(recentMs / 1000),
+            },
+          ],
+        },
+      ])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).not.toContain('ancient.example')
+      expect(csv).toContain('current.example')
+    })
+
+    test('keeps only the latest row per clientName (Sync re-signed dedup)', async () => {
+      const newerMs = Date.now() - HOUR_MS
+      const olderMs = Date.now() - 5 * DAY_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'stale-iphone',
+          clientName: 'François iPhone',
+          lastModified: new Date(olderMs),
+          tabs: [
+            {
+              title: 'stale',
+              urlHistory: ['https://stale.example/'],
+              lastUsed: Math.floor(olderMs / 1000),
+            },
+          ],
+        },
+        {
+          guid: 'active-iphone',
+          clientName: 'François iPhone',
+          lastModified: new Date(newerMs),
+          tabs: [
+            {
+              title: 'fresh',
+              urlHistory: ['https://fresh.example/'],
+              lastUsed: Math.floor(newerMs / 1000),
+            },
+          ],
+        },
+      ])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).not.toContain('stale.example')
+      expect(csv).toContain('fresh.example')
+    })
+
+    test('null clientName uses guid for dedup grouping (not all-NULL collapse)', async () => {
+      const aMs = Date.now() - 2 * HOUR_MS
+      const bMs = Date.now() - HOUR_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'aaaaaaaaaaaa',
+          clientName: null,
+          lastModified: new Date(aMs),
+          tabs: [
+            {
+              title: 'a',
+              urlHistory: ['https://a.example/'],
+              lastUsed: Math.floor(aMs / 1000),
+            },
+          ],
+        },
+        {
+          guid: 'bbbbbbbbbbbb',
+          clientName: null,
+          lastModified: new Date(bMs),
+          tabs: [
+            {
+              title: 'b',
+              urlHistory: ['https://b.example/'],
+              lastUsed: Math.floor(bMs / 1000),
+            },
+          ],
+        },
+      ])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('a.example')
+      expect(csv).toContain('b.example')
+    })
+
+    test('skips tabs whose urlHistory is empty', async () => {
+      const recentMs = Date.now() - HOUR_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'mixedguid001',
+          clientName: 'Mixed Device',
+          lastModified: new Date(recentMs),
+          tabs: [
+            {
+              title: 'good',
+              urlHistory: ['https://good.example/'],
+              lastUsed: Math.floor(recentMs / 1000),
+            },
+            {
+              title: 'empty',
+              urlHistory: [],
+              lastUsed: Math.floor(recentMs / 1000),
+            },
+          ],
+        },
+      ])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      const lines = csv.trim().split('\n')
+      expect(lines).toHaveLength(2)
+      expect(lines[1]).toContain('https://good.example/')
+    })
+
+    test('uses urlHistory[0] as the current URL', async () => {
+      const recentMs = Date.now() - HOUR_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'historyguid1',
+          clientName: 'Device',
+          lastModified: new Date(recentMs),
+          tabs: [
+            {
+              title: 't',
+              urlHistory: [
+                'https://current.example/',
+                'https://previous.example/',
+              ],
+              lastUsed: Math.floor(recentMs / 1000),
+            },
+          ],
+        },
+      ])
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('https://current.example/')
+      expect(csv).not.toContain('previous.example')
+    })
+
+    test('synced_tabs failure surfaces as LocalFirefoxFailure with stage=synced_tabs', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([])
+      tabs.run('DROP TABLE tabs')
+      tabs.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      let caught: unknown
+      try {
+        await src.pull({ outDir, since: SINCE })
+      } catch (e) {
+        caught = e
+      }
+      expect(caught).toMatchObject({
+        name: 'LocalFirefoxFailure',
+        stage: 'synced_tabs',
+      })
+    })
+
+    test('pull succeeds while a writer holds synced-tabs.db open', async () => {
+      const recentMs = Date.now() - HOUR_MS
+      const places = createPlacesDb([])
+      places.close()
+      const tabs = createSyncedTabsDb([
+        {
+          guid: 'lockedguid01',
+          clientName: 'Locked Device',
+          lastModified: new Date(recentMs),
+          tabs: [
+            {
+              title: 'locked',
+              urlHistory: ['https://locked-sync.example/'],
+              lastUsed: Math.floor(recentMs / 1000),
+            },
+          ],
+        },
+      ])
+      tabs.run('PRAGMA journal_mode=WAL')
+      tabs.run('PRAGMA locking_mode=EXCLUSIVE')
+      tabs
+        .prepare(
+          'INSERT INTO tabs (guid, record, last_modified) VALUES (?, ?, ?)',
+        )
+        .run(
+          'forceguid0001',
+          JSON.stringify({ clientName: 'Forcer', tabs: [] }),
+          Date.now(),
+        )
+      try {
+        const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+        await src.pull({ outDir, since: SINCE })
+        const csv = readOpenTabsCsv()
+        expect(csv).toContain('locked-sync.example')
+      } finally {
+        tabs.close()
+      }
     })
   })
 })

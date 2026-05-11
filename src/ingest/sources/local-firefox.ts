@@ -15,6 +15,8 @@ import { z } from 'zod'
 
 import type { Source } from '#src/ingest/orchestrator'
 
+const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000
+
 class LocalFirefoxFailure extends errore.createTaggedError({
   name: 'LocalFirefoxFailure',
   message: 'local-firefox $stage failed: $reason',
@@ -38,11 +40,43 @@ const bookmarkRowSchema = z.object({
 })
 const bookmarkRowsSchema = z.array(bookmarkRowSchema)
 
+const syncedTabRowSchema = z.object({
+  guid: z.string(),
+  record: z.string(),
+  last_modified: z.number(),
+})
+const syncedTabRowsSchema = z.array(syncedTabRowSchema)
+
+const syncedTabEntrySchema = z.object({
+  title: z.string().nullable().optional(),
+  urlHistory: z.array(z.string()),
+  lastUsed: z.number(),
+})
+const syncedTabRecordSchema = z.object({
+  clientName: z.string().nullable().optional(),
+  tabs: z.array(syncedTabEntrySchema).optional().default([]),
+})
+
+const remoteClientsSchema = z.record(
+  z.string(),
+  z.object({ device_name: z.string().optional() }).passthrough(),
+)
+
 function localDateStamp(d: Date): string {
   const y = d.getFullYear()
   const m = String(d.getMonth() + 1).padStart(2, '0')
   const day = String(d.getDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
+}
+
+function localIso(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  return `${y}-${m}-${day} ${hh}:${mm}:${ss}`
 }
 
 function csvField(value: string): string {
@@ -52,7 +86,11 @@ function csvField(value: string): string {
   return value
 }
 
-function snapshotPlaces(profileDir: string): string {
+function snapshotSqlite(
+  profileDir: string,
+  fileName: string,
+  stage: 'snapshot' | 'synced_tabs',
+): string {
   let tmp: string
   try {
     tmp = mkdtempSync(path.join(tmpdir(), 'dream-firefox-snap-'))
@@ -66,21 +104,26 @@ function snapshotPlaces(profileDir: string): string {
   // Plain fs copy bypasses SQLite's advisory locks. Firefox keeps
   // places.sqlite under PRAGMA locking_mode=EXCLUSIVE while running, which
   // blocks any other SQLite connection (and therefore VACUUM INTO) from
-  // opening the file. We mirror the original shell exporter: copy main first,
-  // then -wal so committed-but-uncheckpointed entries are visible.
-  const target = path.join(tmp, 'places.sqlite')
+  // opening the file. Mirror the original shell exporter: copy main, then
+  // -wal so committed-but-uncheckpointed entries are visible; also -shm if
+  // present so the next reader can initialize without contention.
+  const target = path.join(tmp, fileName)
   try {
-    copyFileSync(path.join(profileDir, 'places.sqlite'), target)
-    const wal = path.join(profileDir, 'places.sqlite-wal')
+    copyFileSync(path.join(profileDir, fileName), target)
+    const wal = path.join(profileDir, `${fileName}-wal`)
     if (existsSync(wal)) {
       copyFileSync(wal, `${target}-wal`)
+    }
+    const shm = path.join(profileDir, `${fileName}-shm`)
+    if (existsSync(shm)) {
+      copyFileSync(shm, `${target}-shm`)
     }
   } catch (cause) {
     rmSync(tmp, { recursive: true, force: true })
     const detail = cause instanceof Error ? cause.message : String(cause)
     throw new LocalFirefoxFailure({
-      stage: 'snapshot',
-      reason: `fs copy from ${profileDir}: ${detail}`,
+      stage,
+      reason: `fs copy ${fileName} from ${profileDir}: ${detail}`,
       cause,
     })
   }
@@ -108,6 +151,52 @@ function readBookmarks(db: Database): unknown {
     throw new LocalFirefoxFailure({
       stage: 'bookmarks',
       reason: `reading moz_bookmarks: ${detail}`,
+      cause,
+    })
+  }
+}
+
+function readSyncedTabsRows(db: Database, now: Date): unknown {
+  try {
+    const ageFloorMs = now.getTime() - SIXTY_DAYS_MS
+    return db.query(QUERY_SYNCED_TABS).all({ $ageFloorMs: ageFloorMs })
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new LocalFirefoxFailure({
+      stage: 'synced_tabs',
+      reason: `reading tabs: ${detail}`,
+      cause,
+    })
+  }
+}
+
+function readRemoteClients(
+  db: Database,
+): Record<string, { device_name?: string }> {
+  let row: unknown
+  try {
+    row = db
+      .query("SELECT value AS v FROM moz_meta WHERE key = 'remote_clients'")
+      .get()
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new LocalFirefoxFailure({
+      stage: 'synced_tabs',
+      reason: `reading moz_meta.remote_clients: ${detail}`,
+      cause,
+    })
+  }
+  if (!row) return {}
+  const valueSchema = z.object({ v: z.string() })
+  const parsed = valueSchema.safeParse(row)
+  if (!parsed.success) return {}
+  try {
+    return remoteClientsSchema.parse(JSON.parse(parsed.data.v))
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new LocalFirefoxFailure({
+      stage: 'synced_tabs',
+      reason: `parsing remote_clients json: ${detail}`,
       cause,
     })
   }
@@ -157,6 +246,28 @@ const QUERY_BOOKMARKS = `
   ORDER BY b.dateAdded DESC
 `
 
+// Sync-broken-then-resigned-in devices leave duplicate "Hex"-style rows; keep
+// only the latest per clientName (falling back to guid when null). Drop rows
+// older than 60 days so devices the user no longer syncs with disappear.
+const QUERY_SYNCED_TABS = `
+  WITH ranked AS (
+    SELECT
+      guid,
+      record,
+      last_modified,
+      ROW_NUMBER() OVER (
+        PARTITION BY COALESCE(json_extract(record, '$.clientName'), guid)
+        ORDER BY last_modified DESC
+      ) AS rn
+    FROM tabs
+    WHERE last_modified > $ageFloorMs
+  )
+  SELECT guid, record, last_modified
+  FROM ranked
+  WHERE rn = 1
+  ORDER BY last_modified DESC
+`
+
 function loadBlocklist(blocklistPath: string | undefined): string[] {
   if (!blocklistPath) return []
   let raw: string
@@ -187,6 +298,111 @@ function isBlocked(url: string, blocklist: ReadonlyArray<string>): boolean {
   return blocklist.some((entry) => host === entry || host.endsWith(`.${entry}`))
 }
 
+type OpenTabRow = {
+  last_used: string
+  url: string
+  title: string
+  device: string
+  pinned: string
+}
+
+function buildOpenTabRows(
+  rawRows: unknown,
+  remoteClients: Record<string, { device_name?: string }>,
+): OpenTabRow[] {
+  const rows = syncedTabRowsSchema.parse(rawRows)
+  const out: OpenTabRow[] = []
+  for (const r of rows) {
+    let record: z.infer<typeof syncedTabRecordSchema>
+    try {
+      record = syncedTabRecordSchema.parse(JSON.parse(r.record))
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      throw new LocalFirefoxFailure({
+        stage: 'synced_tabs',
+        reason: `parsing tabs.record for ${r.guid}: ${detail}`,
+        cause,
+      })
+    }
+    const device =
+      record.clientName ?? remoteClients[r.guid]?.device_name ?? r.guid
+    for (const tab of record.tabs) {
+      if (tab.urlHistory.length === 0) continue
+      out.push({
+        last_used: localIso(new Date(tab.lastUsed * 1000)),
+        url: tab.urlHistory[0]!,
+        title: tab.title ?? '',
+        device,
+        pinned: '',
+      })
+    }
+  }
+  return out
+}
+
+function readPlacesFromProfile(
+  profileDir: string,
+  since: Date,
+): { places: unknown; bookmarks: unknown } {
+  const snapshotPath = snapshotSqlite(profileDir, 'places.sqlite', 'snapshot')
+  try {
+    let db: Database
+    try {
+      db = new Database(snapshotPath, { readonly: true })
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      throw new LocalFirefoxFailure({
+        stage: 'open',
+        reason: `opening places.sqlite snapshot: ${detail}`,
+        cause,
+      })
+    }
+    try {
+      const places = readPlaces(db, since)
+      const bookmarks = readBookmarks(db)
+      return { places, bookmarks }
+    } finally {
+      db.close()
+    }
+  } finally {
+    rmSync(path.dirname(snapshotPath), { recursive: true, force: true })
+  }
+}
+
+function readSyncedTabsFromProfile(profileDir: string): OpenTabRow[] {
+  const src = path.join(profileDir, 'synced-tabs.db')
+  // Profile may not have synced-tabs.db if Sync was never enabled. Treat
+  // as zero-tabs rather than an error.
+  if (!existsSync(src)) return []
+  const snapshotPath = snapshotSqlite(
+    profileDir,
+    'synced-tabs.db',
+    'synced_tabs',
+  )
+  try {
+    let db: Database
+    try {
+      db = new Database(snapshotPath, { readonly: true })
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause)
+      throw new LocalFirefoxFailure({
+        stage: 'synced_tabs',
+        reason: `opening synced-tabs.db snapshot: ${detail}`,
+        cause,
+      })
+    }
+    try {
+      const rawRows = readSyncedTabsRows(db, new Date())
+      const remoteClients = readRemoteClients(db)
+      return buildOpenTabRows(rawRows, remoteClients)
+    } finally {
+      db.close()
+    }
+  } finally {
+    rmSync(path.dirname(snapshotPath), { recursive: true, force: true })
+  }
+}
+
 export function ingestLocalFirefox(opts: {
   machine: string
   profileDir: string
@@ -197,30 +413,10 @@ export function ingestLocalFirefox(opts: {
     source: 'firefox',
     pull: async ({ outDir, since }) => {
       const blocklist = loadBlocklist(opts.blocklistPath)
-      const snapshotPath = snapshotPlaces(opts.profileDir)
-      let placesRaw: unknown
-      let bookmarksRaw: unknown
-      try {
-        let db: Database
-        try {
-          db = new Database(snapshotPath, { readonly: true })
-        } catch (cause) {
-          const detail = cause instanceof Error ? cause.message : String(cause)
-          throw new LocalFirefoxFailure({
-            stage: 'open',
-            reason: `opening snapshot: ${detail}`,
-            cause,
-          })
-        }
-        try {
-          placesRaw = readPlaces(db, since)
-          bookmarksRaw = readBookmarks(db)
-        } finally {
-          db.close()
-        }
-      } finally {
-        rmSync(path.dirname(snapshotPath), { recursive: true, force: true })
-      }
+      const { places: placesRaw, bookmarks: bookmarksRaw } =
+        readPlacesFromProfile(opts.profileDir, since)
+      const openTabs = readSyncedTabsFromProfile(opts.profileDir)
+
       const allRows = placeRowsSchema.parse(placesRaw)
       const rows = allRows.filter((r) => !isBlocked(r.url, blocklist))
       const blocklistFiltered = allRows.length - rows.length
@@ -258,13 +454,32 @@ export function ingestLocalFirefox(opts: {
       const bookmarksPath = path.join(outDir, `${stamp}.bookmarks.csv`)
       await Bun.write(bookmarksPath, bookmarksLines.join('\n') + '\n')
 
-      const bytes = statSync(historyPath).size + statSync(bookmarksPath).size
+      const openTabsLines = ['last_used,url,title,device,pinned']
+      for (const t of openTabs) {
+        openTabsLines.push(
+          [
+            csvField(t.last_used),
+            csvField(t.url),
+            csvField(t.title),
+            csvField(t.device),
+            csvField(t.pinned),
+          ].join(','),
+        )
+      }
+      const openTabsPath = path.join(outDir, `${stamp}.open-tabs.csv`)
+      await Bun.write(openTabsPath, openTabsLines.join('\n') + '\n')
+
+      const bytes =
+        statSync(historyPath).size +
+        statSync(bookmarksPath).size +
+        statSync(openTabsPath).size
       return {
-        files_pulled: 2,
+        files_pulled: 3,
         bytes,
         rows: rows.length,
         blocklist_filtered: blocklistFiltered,
         bookmark_rows: bookmarkRows.length,
+        open_tab_rows: openTabs.length,
       }
     },
   }
