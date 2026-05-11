@@ -2,48 +2,14 @@ import path from 'node:path'
 
 import { z } from 'zod'
 
+import {
+  type ClaudeEntry,
+  entryText,
+  parseEntries,
+  stripFraming,
+} from './entries.ts'
+
 const RENDERER_VERSION = 'claude-md@1'
-
-const textPartSchema = z.object({
-  type: z.literal('text'),
-  text: z.string(),
-})
-
-const toolUsePartSchema = z.object({
-  type: z.literal('tool_use'),
-  name: z.string().optional(),
-})
-
-const toolResultPartSchema = z.object({
-  type: z.literal('tool_result'),
-})
-
-const otherPartSchema = z.object({
-  type: z.string(),
-})
-
-const partSchema = z.union([
-  textPartSchema,
-  toolUsePartSchema,
-  toolResultPartSchema,
-  otherPartSchema,
-])
-
-const messageSchema = z.object({
-  role: z.string().optional(),
-  content: z.union([z.string(), z.array(partSchema)]).optional(),
-})
-
-const baseEntrySchema = z.object({
-  type: z.string(),
-  sessionId: z.string().optional(),
-  cwd: z.string().optional(),
-  timestamp: z.string().optional(),
-  message: messageSchema.optional(),
-  title: z.string().optional(),
-})
-
-type ClaudeEntry = z.infer<typeof baseEntrySchema>
 
 const frontmatterSchema = z.object({
   sessionId: z.string(),
@@ -58,50 +24,6 @@ const frontmatterSchema = z.object({
 })
 
 export type Frontmatter = z.infer<typeof frontmatterSchema>
-
-function parseEntries(jsonlText: string): ClaudeEntry[] {
-  const out: ClaudeEntry[] = []
-  for (const raw of jsonlText.split('\n')) {
-    if (raw.length === 0) continue
-    let json: unknown
-    try {
-      json = JSON.parse(raw)
-    } catch {
-      continue
-    }
-    const parsed = baseEntrySchema.safeParse(json)
-    if (parsed.success) out.push(parsed.data)
-  }
-  return out
-}
-
-const FRAMING_TAGS = [
-  'system-reminder',
-  'command-name',
-  'command-message',
-  'command-args',
-  'local-command-stdout',
-] as const
-
-function stripFraming(text: string): string {
-  let out = text
-  for (const tag of FRAMING_TAGS) {
-    const re = new RegExp(`<${tag}[^>]*>[\\s\\S]*?</${tag}>`, 'g')
-    out = out.replace(re, '')
-  }
-  return out.trim()
-}
-
-function entryText(entry: ClaudeEntry): string {
-  const content = entry.message?.content
-  if (content === undefined) return ''
-  if (typeof content === 'string') return content
-  const parts: string[] = []
-  for (const c of content) {
-    if (c.type === 'text' && 'text' in c) parts.push(c.text)
-  }
-  return parts.join('\n')
-}
 
 function countToolUses(entry: ClaudeEntry): number {
   const content = entry.message?.content
