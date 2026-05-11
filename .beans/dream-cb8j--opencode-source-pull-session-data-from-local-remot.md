@@ -1,7 +1,7 @@
 ---
 # dream-cb8j
 title: 'OpenCode source: pull session data from local & remote sqlite dbs'
-status: todo
+status: completed
 type: epic
 priority: high
 created_at: 2026-05-11T10:36:00Z
