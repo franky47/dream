@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import * as errore from 'errore'
+import * as lz4js from 'lz4js'
 import { z } from 'zod'
 
 import type { Source } from '#src/ingest/orchestrator'
@@ -61,6 +62,25 @@ const remoteClientsSchema = z.record(
   z.string(),
   z.object({ device_name: z.string().optional() }).passthrough(),
 )
+
+const sessionEntrySchema = z.object({
+  url: z.string(),
+  title: z.string().nullable().optional(),
+})
+const sessionTabSchema = z.object({
+  entries: z.array(sessionEntrySchema),
+  index: z.number().int().positive(),
+  lastAccessed: z.number(),
+  pinned: z.boolean().optional(),
+})
+const sessionWindowSchema = z.object({
+  tabs: z.array(sessionTabSchema),
+})
+const sessionStoreSchema = z.object({
+  windows: z.array(sessionWindowSchema),
+})
+
+const MOZLZ4_MAGIC = new TextEncoder().encode('mozLz40\0')
 
 function localDateStamp(d: Date): string {
   const y = d.getFullYear()
@@ -403,6 +423,98 @@ function readSyncedTabsFromProfile(profileDir: string): OpenTabRow[] {
   }
 }
 
+function decodeMozLz4(bytes: Uint8Array): string {
+  if (bytes.length < 12) {
+    throw new LocalFirefoxFailure({
+      stage: 'session_store',
+      reason: `file shorter than mozLz4 12-byte header (${bytes.length} bytes)`,
+    })
+  }
+  for (let i = 0; i < 8; i++) {
+    if (bytes[i] !== MOZLZ4_MAGIC[i]) {
+      throw new LocalFirefoxFailure({
+        stage: 'session_store',
+        reason: `bad mozLz4 magic at offset ${i}`,
+      })
+    }
+  }
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+  const uncompressedSize = view.getUint32(8, true)
+  const dst = new Uint8Array(uncompressedSize)
+  const decompressedLen = lz4js.decompressBlock(
+    bytes,
+    dst,
+    12,
+    bytes.length - 12,
+    0,
+  )
+  if (decompressedLen !== uncompressedSize) {
+    throw new LocalFirefoxFailure({
+      stage: 'session_store',
+      reason: `lz4 produced ${decompressedLen} bytes, expected ${uncompressedSize}`,
+    })
+  }
+  return new TextDecoder().decode(dst)
+}
+
+function readSessionStore(profileDir: string, machine: string): OpenTabRow[] {
+  const recovery = path.join(
+    profileDir,
+    'sessionstore-backups',
+    'recovery.jsonlz4',
+  )
+  const fallback = path.join(profileDir, 'sessionstore.jsonlz4')
+  const target = existsSync(recovery)
+    ? recovery
+    : existsSync(fallback)
+      ? fallback
+      : null
+  if (target === null) return []
+  let bytes: Uint8Array
+  try {
+    bytes = readFileSync(target)
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new LocalFirefoxFailure({
+      stage: 'session_store',
+      reason: `read ${target}: ${detail}`,
+      cause,
+    })
+  }
+  const json = decodeMozLz4(bytes)
+  let parsed: z.infer<typeof sessionStoreSchema>
+  try {
+    parsed = sessionStoreSchema.parse(JSON.parse(json))
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause)
+    throw new LocalFirefoxFailure({
+      stage: 'session_store',
+      reason: `parsing sessionstore json: ${detail}`,
+      cause,
+    })
+  }
+  const rows: OpenTabRow[] = []
+  for (const win of parsed.windows) {
+    for (const tab of win.tabs) {
+      if (tab.entries.length === 0) continue
+      // Clamp on the upper bound only — Firefox has had off-by-one bugs where
+      // `index` exceeds `entries.length` for newly-opened tabs. Lower bound is
+      // enforced by the positive() schema constraint.
+      const idx = Math.min(tab.index - 1, tab.entries.length - 1)
+      const entry = tab.entries[idx]
+      if (!entry) continue
+      rows.push({
+        last_used: localIso(new Date(tab.lastAccessed)),
+        url: entry.url,
+        title: entry.title ?? '',
+        device: machine,
+        pinned: tab.pinned ? '1' : '0',
+      })
+    }
+  }
+  return rows
+}
+
 export function ingestLocalFirefox(opts: {
   machine: string
   profileDir: string
@@ -413,16 +525,23 @@ export function ingestLocalFirefox(opts: {
     source: 'firefox',
     pull: async ({ outDir, since }) => {
       const blocklist = loadBlocklist(opts.blocklistPath)
+      const now = new Date()
       const { places: placesRaw, bookmarks: bookmarksRaw } =
         readPlacesFromProfile(opts.profileDir, since)
-      const openTabs = readSyncedTabsFromProfile(opts.profileDir)
+      const syncedTabs = readSyncedTabsFromProfile(opts.profileDir)
+      const localTabs = readSessionStore(opts.profileDir, opts.machine)
+      // last_used is ISO `YYYY-MM-DD HH:MM:SS` — lexicographic order matches
+      // chronological order, so a string compare sorts the merged list.
+      const openTabs = [...localTabs, ...syncedTabs].sort((a, b) =>
+        b.last_used.localeCompare(a.last_used),
+      )
 
       const allRows = placeRowsSchema.parse(placesRaw)
       const rows = allRows.filter((r) => !isBlocked(r.url, blocklist))
       const blocklistFiltered = allRows.length - rows.length
       const bookmarkRows = bookmarkRowsSchema.parse(bookmarksRaw)
 
-      const stamp = localDateStamp(new Date())
+      const stamp = localDateStamp(now)
 
       const historyLines = ['visited,url,title,visit_count,frecency,typed']
       for (const r of rows) {

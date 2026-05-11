@@ -10,6 +10,8 @@ import {
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
+import * as lz4js from 'lz4js'
+
 import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 
 let workDir: string
@@ -132,6 +134,47 @@ function createSyncedTabsDb(
     )
   }
   return db
+}
+
+type LocalTabEntry = {
+  url: string
+  title?: string
+}
+
+type LocalTabInput = {
+  entries: LocalTabEntry[]
+  index: number
+  lastAccessed: number
+  pinned?: boolean
+}
+
+type LocalWindowInput = {
+  tabs: LocalTabInput[]
+}
+
+function writeSessionStore(
+  filePath: string,
+  content: { windows: LocalWindowInput[] },
+): void {
+  const json = JSON.stringify(content)
+  const payload = new TextEncoder().encode(json)
+  const hashTable = new Uint32Array(1 << 16)
+  const dst = new Uint8Array(lz4js.compressBound(payload.length))
+  const compressedLen = lz4js.compressBlock(
+    payload,
+    dst,
+    0,
+    payload.length,
+    hashTable,
+  )
+  if (compressedLen === 0) {
+    throw new Error('lz4 compressBlock returned 0; payload too small to test')
+  }
+  const file = new Uint8Array(12 + compressedLen)
+  file.set(new TextEncoder().encode('mozLz40\0'), 0)
+  new DataView(file.buffer).setUint32(8, payload.length, true)
+  file.set(dst.subarray(0, compressedLen), 12)
+  writeFileSync(filePath, file)
 }
 
 function createPlacesDb(rows: ReadonlyArray<PlaceRow>): Database {
@@ -1308,6 +1351,447 @@ describe('ingestLocalFirefox', () => {
       } finally {
         tabs.close()
       }
+    })
+  })
+
+  describe('local-tabs session store', () => {
+    const HOUR_MS = 60 * 60 * 1000
+
+    function sessionStorePath(): string {
+      return path.join(profileDir, 'sessionstore.jsonlz4')
+    }
+
+    function recoveryPath(): string {
+      const dir = path.join(profileDir, 'sessionstore-backups')
+      mkdirSync(dir, { recursive: true })
+      return path.join(dir, 'recovery.jsonlz4')
+    }
+
+    test('emits no local rows when both jsonlz4 files are absent', async () => {
+      const places = createPlacesDb([])
+      places.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv.trim()).toBe('last_used,url,title,device,pinned')
+    })
+
+    test('surfaces tab from sessionstore.jsonlz4 with device=machine', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(sessionStorePath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://local.example/', title: 'Local' }],
+                index: 1,
+                lastAccessed,
+                pinned: false,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      const lines = csv.trim().split('\n')
+      expect(lines).toHaveLength(2)
+      const cells = lines[1]!.split(',')
+      expect(cells[0]).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/)
+      expect(cells[1]).toBe('https://local.example/')
+      expect(cells[2]).toBe('Local')
+      expect(cells[3]).toBe('m4x')
+      expect(cells[4]).toBe('0')
+    })
+
+    test('prefers sessionstore-backups/recovery.jsonlz4 over sessionstore.jsonlz4', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(sessionStorePath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://stale.example/', title: 'stale' }],
+                index: 1,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://fresh.example/', title: 'fresh' }],
+                index: 1,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('https://fresh.example/')
+      expect(csv).not.toContain('stale.example')
+    })
+
+    test('falls back to sessionstore.jsonlz4 when recovery is absent', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(sessionStorePath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [
+                  { url: 'https://only-shutdown.example/', title: 't' },
+                ],
+                index: 1,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('https://only-shutdown.example/')
+    })
+
+    test('picks entries[index - 1] as the current entry', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [
+                  { url: 'https://oldest.example/', title: 'oldest' },
+                  { url: 'https://current.example/', title: 'current' },
+                  { url: 'https://forward.example/', title: 'forward' },
+                ],
+                index: 2,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('https://current.example/')
+      expect(csv).not.toContain('oldest.example')
+      expect(csv).not.toContain('forward.example')
+    })
+
+    test('flattens tabs across multiple windows', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://win1.example/', title: 'w1' }],
+                index: 1,
+                lastAccessed,
+              },
+            ],
+          },
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://win2.example/', title: 'w2' }],
+                index: 1,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('https://win1.example/')
+      expect(csv).toContain('https://win2.example/')
+    })
+
+    test('pinned tabs emit pinned=1, others emit 0', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://pinned.example/', title: 'p' }],
+                index: 1,
+                lastAccessed,
+                pinned: true,
+              },
+              {
+                entries: [{ url: 'https://unpinned.example/', title: 'u' }],
+                index: 1,
+                lastAccessed,
+                pinned: false,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      const lines = csv.trim().split('\n')
+      const byUrl = new Map(
+        lines.slice(1).map((l) => {
+          const c = l.split(',')
+          return [c[1]!, c[4]!] as const
+        }),
+      )
+      expect(byUrl.get('https://pinned.example/')).toBe('1')
+      expect(byUrl.get('https://unpinned.example/')).toBe('0')
+    })
+
+    test('skips tabs whose entries[] array is empty', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [],
+                index: 1,
+                lastAccessed,
+              },
+              {
+                entries: [{ url: 'https://good.example/', title: 'good' }],
+                index: 1,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      const lines = csv.trim().split('\n')
+      expect(lines).toHaveLength(2)
+      expect(lines[1]).toContain('https://good.example/')
+    })
+
+    test('rejects records with index=0 (1-based field; 0 means corruption)', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://x.example/', title: 'x' }],
+                index: 0,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      let caught: unknown
+      try {
+        await src.pull({ outDir, since: SINCE })
+      } catch (e) {
+        caught = e
+      }
+      expect(caught).toMatchObject({
+        name: 'LocalFirefoxFailure',
+        stage: 'session_store',
+      })
+    })
+
+    test('clamps an out-of-range index to the last entry', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const lastAccessed = Date.now() - HOUR_MS
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [
+                  { url: 'https://first.example/', title: 'first' },
+                  { url: 'https://second.example/', title: 'second' },
+                ],
+                index: 99,
+                lastAccessed,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('https://second.example/')
+      expect(csv).not.toContain('first.example')
+    })
+
+    test('rejects file without the mozLz40 magic header', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      writeFileSync(sessionStorePath(), Buffer.from('not lz4 data at all'))
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      let caught: unknown
+      try {
+        await src.pull({ outDir, since: SINCE })
+      } catch (e) {
+        caught = e
+      }
+      expect(caught).toMatchObject({
+        name: 'LocalFirefoxFailure',
+        stage: 'session_store',
+      })
+    })
+
+    test('local and synced rows appear together in the same CSV', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const recent = Date.now() - HOUR_MS
+      createSyncedTabsDb([
+        {
+          guid: 'syncedguid001',
+          clientName: 'iPhone',
+          lastModified: new Date(recent),
+          tabs: [
+            {
+              title: 'remote',
+              urlHistory: ['https://remote.example/'],
+              lastUsed: Math.floor(recent / 1000),
+            },
+          ],
+        },
+      ]).close()
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://local.example/', title: 'local' }],
+                index: 1,
+                lastAccessed: recent,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      expect(csv).toContain('https://remote.example/')
+      expect(csv).toContain('https://local.example/')
+      expect(csv).toContain('m4x')
+      expect(csv).toContain('iPhone')
+    })
+
+    test('merged CSV is ordered by last_used descending across local and synced rows', async () => {
+      const places = createPlacesDb([])
+      places.close()
+      const newestMs = Date.now() - HOUR_MS
+      const middleMs = Date.now() - 3 * HOUR_MS
+      const oldestMs = Date.now() - 5 * HOUR_MS
+      createSyncedTabsDb([
+        {
+          guid: 'syncednewest',
+          clientName: 'iPhone',
+          lastModified: new Date(newestMs),
+          tabs: [
+            {
+              title: 'newest',
+              urlHistory: ['https://newest.example/'],
+              lastUsed: Math.floor(newestMs / 1000),
+            },
+          ],
+        },
+        {
+          guid: 'syncedoldest',
+          clientName: 'iPad',
+          lastModified: new Date(oldestMs),
+          tabs: [
+            {
+              title: 'oldest',
+              urlHistory: ['https://oldest.example/'],
+              lastUsed: Math.floor(oldestMs / 1000),
+            },
+          ],
+        },
+      ]).close()
+      writeSessionStore(recoveryPath(), {
+        windows: [
+          {
+            tabs: [
+              {
+                entries: [{ url: 'https://middle.example/', title: 'middle' }],
+                index: 1,
+                lastAccessed: middleMs,
+              },
+            ],
+          },
+        ],
+      })
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ outDir, since: SINCE })
+
+      const csv = readOpenTabsCsv()
+      const lines = csv.trim().split('\n').slice(1)
+      const urls = lines.map((l) => l.split(',')[1]!)
+      expect(urls).toEqual([
+        'https://newest.example/',
+        'https://middle.example/',
+        'https://oldest.example/',
+      ])
     })
   })
 })
