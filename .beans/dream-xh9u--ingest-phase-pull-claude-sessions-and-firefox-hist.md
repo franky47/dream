@@ -1,12 +1,29 @@
 ---
 # dream-xh9u
 title: 'Ingest phase: pull Claude sessions and Firefox history into data/raw/'
-status: todo
+status: completed
 type: epic
 priority: high
 created_at: 2026-05-10T12:08:32Z
-updated_at: 2026-05-10T12:08:32Z
+updated_at: 2026-05-11T08:54:50Z
 ---
+
+## Summary of Changes
+
+All four child slices shipped:
+
+- `dream-b7nn` — ingest scaffolding (orchestrator, run-log shape, `data/raw/{machine}/{source}/` layout, per-source wipe-before-pull) + the first source: local m4x Claude sessions via fs copy.
+- `dream-25kr` — local Firefox source ported to Bun reading `places.sqlite` via `bun:sqlite` (no filtering yet).
+- `dream-bytd` — Firefox domain blocklist filter (`config/firefox-blocklist.txt`), applied to history rows post-query.
+- `dream-9csm` — Echo claude-sessions source via a single ssh + bsdtar pipeline through `Bun.spawn`. User-verified ok-path against the live `echo` host.
+
+Cross-cutting decisions surfaced during the work and locked into project memory:
+
+- Ingest sources named by transport (`local-`, `ssh-`) — the machine label is a runtime parameter, not part of the source identity.
+- Source-list env vars are plural from day one (`DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS`) so a second remote can be added without rewriting config.
+- `Bun.$` does not honour `set -o pipefail`; ssh+tar pipelines use `Bun.spawn` on both sides with manual exit-code checks.
+- Pull cleanup scripts go through `bun run clean:<thing>` rather than ad-hoc `rm -rf` to keep destructive actions out of permission prompts.
+- All sources are tested at the smallest controllable seam (fake upstream argv for ssh pipelines, synthetic sqlite fixtures for places) — "shells out, therefore untestable" is rejected.
 
 ## Problem Statement
 
