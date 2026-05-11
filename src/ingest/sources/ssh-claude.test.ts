@@ -86,7 +86,9 @@ describe('runSshTarPipeline', () => {
 
     expect(listFiles(outDir).filter((f) => !f.startsWith('.'))).toEqual([
       '-Users-franky-projA/aaa.jsonl',
+      '-Users-franky-projA/aaa.md',
       '-Users-franky-projB/bbb.jsonl',
+      '-Users-franky-projB/bbb.md',
     ])
     expect(result).toEqual({
       sessions_pulled: 2,
@@ -111,6 +113,7 @@ describe('runSshTarPipeline', () => {
 
     expect(listFiles(outDir).filter((f) => !f.startsWith('.'))).toEqual([
       '-Users-franky-projA/aaa.jsonl',
+      '-Users-franky-projA/aaa.md',
       '-Users-franky-projA/memory/MEMORY.md',
       '-Users-franky-projA/memory/feedback_x.md',
     ])

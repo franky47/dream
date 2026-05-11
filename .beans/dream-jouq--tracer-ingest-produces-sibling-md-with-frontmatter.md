@@ -31,19 +31,28 @@ See parent PRD dream-kag4 — sections "Solution", "Implementation Decisions", a
 
 ## Acceptance criteria
 
-- [ ] `src/lib/claude/renderer/` exists with `renderClaudeSession(jsonlText: string): string` as the public entry point.
-- [ ] Frontmatter has all fields in PRD: sessionId, cwd, project, startedAt, endedAt, turns, title, toolUses, renderer.
-- [ ] Title fallback chain implemented and tested (ai-title present, ai-title absent, slash-command-only first user message).
-- [ ] `<turn n="" role="" t=""/>` markers emitted between turn bodies; deltas computed from timestamps; first turn `t="0"`.
-- [ ] Every tool call renders as a self-closing `<tool name="..." ...attrs.../>` (generic fallback; no specialised reducers in this slice).
-- [ ] Dropped entry types do not appear anywhere in rendered output.
-- [ ] `<system-reminder>` and `<command-*>` framing tags stripped from user text; slash-command surfaces as one line.
-- [ ] `local-claude.ts` and `ssh-claude.ts` write `.md` siblings after each `.jsonl`.
-- [ ] Path migration complete: no `raw/` references remain in `src/`, `package.json`, or anything not explicitly in the historical context (FUTURE.md, HANDOFF.md, archived beans may keep references).
-- [ ] Fixture-driven tests in `src/lib/claude/renderer/` covering: title fallback chain, frontmatter extraction, turn marker emission, generic tool fallback, dropped entries, framing-strip.
-- [ ] `bun run ingest` against existing m4x claude data produces both `.jsonl` and `.md` siblings, rendered files parse as valid YAML-frontmattered markdown, `bun check` passes.
-- [ ] `scripts/measure-tokens.sh` produces a baseline ratio: jsonl tokens vs md tokens (expected modest reduction at this stage, real wins arrive in slices 3 & 4).
+- [x] `src/lib/claude/renderer/` exists with `renderClaudeSession(jsonlText: string): string` as the public entry point.
+- [x] Frontmatter has all fields in PRD: sessionId, cwd, project, startedAt, endedAt, turns, title, toolUses, renderer.
+- [x] Title fallback chain implemented and tested (ai-title present, ai-title absent, slash-command-only first user message).
+- [x] `<turn n="" role="" t=""/>` markers emitted between turn bodies; deltas computed from timestamps; first turn `t="0"`.
+- [x] Every tool call renders as a self-closing `<tool name="..." ...attrs.../>` (generic fallback; no specialised reducers in this slice).
+- [x] Dropped entry types do not appear anywhere in rendered output.
+- [x] `<system-reminder>` and `<command-*>` framing tags stripped from user text; slash-command surfaces as one line.
+- [x] `local-claude.ts` and `ssh-claude.ts` write `.md` siblings after each `.jsonl`.
+- [x] Path migration complete: no `raw/` references remain in `src/`, `package.json`, or anything not explicitly in the historical context (FUTURE.md, HANDOFF.md, archived beans may keep references).
+- [x] Fixture-driven tests in `src/lib/claude/renderer/` covering: title fallback chain, frontmatter extraction, turn marker emission, generic tool fallback, dropped entries, framing-strip.
+- [~] `bun run ingest` against existing m4x claude data produces both `.jsonl` and `.md` siblings, rendered files parse as valid YAML-frontmattered markdown, `bun check` passes. (Wiring + `bun check` verified; real-data ingest run for the user to perform — agent doesn't touch real `~/.claude` per `feedback_no_real_user_data`.)
+- [ ] `scripts/measure-tokens.sh` produces a baseline ratio: jsonl tokens vs md tokens (expected modest reduction at this stage, real wins arrive in slices 3 & 4). (Deferred — needs real ingest output; suggest splitting into a follow-up bean.)
 
 ## User stories addressed
 
 - User story 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23, 24
+
+## Summary of Changes
+
+- Added `src/lib/claude/renderer/` deep module: `entries.ts` (shared JSONL parsing, framing-strip, slash-command detection), `frontmatter.ts` (Zod-validated frontmatter object + YAML serializer with stable key order), `render.ts` (turn-marker emission, generic `<tool>` fallback, time-delta formatting, dropped-type filter), `index.ts` (public `renderClaudeSession` entry).
+- `package.json` `imports` gained `#lib/claude/renderer` → `./src/lib/claude/renderer/index.ts`.
+- Wired both Claude sources: `local-claude.ts` renders each newly-copied JSONL to a sibling `.md` inside the same `copyIfFresh` loop; `ssh-claude.ts` collects JSONL paths during the metrics walk, then renders after the walk completes so the rendered `.md` siblings don't get miscounted as memory files.
+- Path migration: `src/ingest/orchestrator.ts` now writes to `data/<machine>/<source>/...` (no `raw/`); `src/ingest/main.ts` writes meta logs to `data/_meta/...`; `package.json` scripts renamed (`clean:raw` → `clean:legacy-raw` as migration aid, plus new `clean:data`).
+- Test coverage: 19 fixture-driven renderer tests covering frontmatter extraction, title fallback chain, framing strip, turn markers with deltas, generic tool fallback, dropped types, slash-command surfacing; source tests updated to assert sibling `.md` writes for both transports.
+- `bun check` green across 136 tests.

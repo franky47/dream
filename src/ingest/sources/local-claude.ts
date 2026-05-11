@@ -3,6 +3,7 @@ import path from 'node:path'
 
 import { Glob } from 'bun'
 
+import { renderClaudeSession } from '#lib/claude/renderer'
 import type { Source } from '#src/ingest/orchestrator'
 
 export function ingestLocalClaude(opts: {
@@ -29,6 +30,14 @@ export function ingestLocalClaude(opts: {
         return true
       }
 
+      const renderSibling = async (rel: string): Promise<void> => {
+        const jsonlPath = path.join(outDir, rel)
+        const jsonlText = await Bun.file(jsonlPath).text()
+        const md = renderClaudeSession(jsonlText)
+        const mdPath = jsonlPath.replace(/\.jsonl$/, '.md')
+        await Bun.write(mdPath, md)
+      }
+
       const sessions = new Glob('**/*.jsonl')
       for await (const rel of sessions.scan({
         cwd: opts.sourceDir,
@@ -36,7 +45,10 @@ export function ingestLocalClaude(opts: {
         onlyFiles: true,
       })) {
         if (rel.split(path.sep).includes('subagents')) continue
-        if (await copyIfFresh(rel)) sessionsPulled += 1
+        if (await copyIfFresh(rel)) {
+          sessionsPulled += 1
+          await renderSibling(rel)
+        }
       }
 
       const memories = new Glob('*/memory/*.md')

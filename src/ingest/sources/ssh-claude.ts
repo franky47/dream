@@ -4,6 +4,7 @@ import path from 'node:path'
 import { Glob } from 'bun'
 import * as errore from 'errore'
 
+import { renderClaudeSession } from '#lib/claude/renderer'
 import type { Source } from '#src/ingest/orchestrator'
 
 const SOURCE = 'claude'
@@ -86,11 +87,22 @@ export async function runSshTarPipeline(opts: {
   let sessionsPulled = 0
   let memoriesPulled = 0
   let bytes = 0
+  const jsonlPaths: string[] = []
   for await (const rel of glob.scan({ cwd: opts.outDir, onlyFiles: true })) {
-    const info = await stat(path.join(opts.outDir, rel))
+    const abs = path.join(opts.outDir, rel)
+    const info = await stat(abs)
     bytes += info.size
-    if (rel.endsWith('.jsonl')) sessionsPulled += 1
-    else if (rel.endsWith('.md')) memoriesPulled += 1
+    if (rel.endsWith('.jsonl')) {
+      sessionsPulled += 1
+      jsonlPaths.push(abs)
+    } else if (rel.endsWith('.md')) {
+      memoriesPulled += 1
+    }
+  }
+  for (const abs of jsonlPaths) {
+    const jsonlText = await Bun.file(abs).text()
+    const md = renderClaudeSession(jsonlText)
+    await Bun.write(abs.replace(/\.jsonl$/, '.md'), md)
   }
   return {
     sessions_pulled: sessionsPulled,

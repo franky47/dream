@@ -61,7 +61,7 @@ async function main(): Promise<number> {
 
   const outcome = await run({ sources, dataDir: cfg.dataDir, since })
 
-  const metaDir = path.join(cfg.dataDir, 'raw', '_meta')
+  const metaDir = path.join(cfg.dataDir, '_meta')
   const prep = await mkdir(metaDir, { recursive: true }).catch(
     (e) => new IngestFatal({ reason: `mkdir ${metaDir}`, cause: e }),
   )

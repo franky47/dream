@@ -3,13 +3,14 @@
   "private": true,
   "imports": {
     "#src/*": "./src/*.ts",
+    "#lib/claude/renderer": "./src/lib/claude/renderer/index.ts",
     "#lib/opencode/pull": "./src/lib/opencode/pull/index.ts",
     "#lib/*": "./src/lib/*.ts"
   },
   "scripts": {
     "check": "bun run fmt:check && bun run lint && bun run typecheck && bun run test && bun run knip",
-    "clean:legacy-claude-sessions": "rm -rf data/raw/*/claude-sessions",
-    "clean:raw": "rm -rf data/raw",
+    "clean:data": "rm -rf data",
+    "clean:legacy-raw": "rm -rf data/raw",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",
     "ingest": "bun src/ingest/main.ts",

@@ -55,7 +55,7 @@ async function runOne({
   dataDir: string
   since: Date
 }): Promise<SourceResult> {
-  const outDir = path.join(dataDir, 'raw', source.machine, source.source)
+  const outDir = path.join(dataDir, source.machine, source.source)
   const start = performance.now()
   const removed = await rm(outDir, { recursive: true, force: true }).catch(
     (e) =>

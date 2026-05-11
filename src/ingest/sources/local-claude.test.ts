@@ -93,6 +93,7 @@ describe('ingestLocalClaude', () => {
 
     expect(listFiles(outDir)).toEqual([
       '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
+      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md',
     ])
     expect(metrics).toEqual({
       sessions_pulled: 1,
@@ -118,6 +119,7 @@ describe('ingestLocalClaude', () => {
 
     expect(listFiles(outDir)).toEqual([
       '-Users-franky-projA/dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl',
+      '-Users-franky-projA/dddddddd-dddd-dddd-dddd-dddddddddddd.md',
     ])
     expect(metrics.sessions_pulled).toBe(1)
   })
@@ -149,6 +151,7 @@ describe('ingestLocalClaude', () => {
 
     expect(listFiles(outDir)).toEqual([
       '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
+      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md',
       '-Users-franky-projA/memory/MEMORY.md',
       '-Users-franky-projA/memory/feedback_foo.md',
     ])
@@ -175,6 +178,36 @@ describe('ingestLocalClaude', () => {
       '-Users-franky-projA/memory/feedback_foo.md',
     ])
     expect(metrics.memories_pulled).toBe(1)
+  })
+
+  test('writes a sibling .md for each pulled .jsonl with valid YAML frontmatter', async () => {
+    writeJsonl(
+      '-Users-franky-projA/ffffffff-ffff-ffff-ffff-ffffffffffff.jsonl',
+      JSON.stringify({
+        type: 'user',
+        sessionId: 'ses_1',
+        cwd: '/repo',
+        timestamp: '2026-05-11T10:00:00Z',
+        message: { role: 'user', content: 'hello world' },
+      }) + '\n',
+      IN_WINDOW,
+    )
+
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
+    await src.pull({ outDir, since: SINCE })
+
+    const md = readFileSync(
+      path.join(
+        outDir,
+        '-Users-franky-projA/ffffffff-ffff-ffff-ffff-ffffffffffff.md',
+      ),
+      'utf-8',
+    )
+    expect(md.startsWith('---\n')).toBe(true)
+    expect(md).toContain('sessionId: ses_1')
+    expect(md).toContain('renderer: "claude-md@1"')
+    expect(md).toContain('<turn n="1" role="user" t="0"/>')
+    expect(md).toContain('hello world')
   })
 
   test('copied bytes match the source files', async () => {
