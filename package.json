@@ -6,6 +6,7 @@
   },
   "scripts": {
     "check": "bun run fmt:check && bun run lint && bun run typecheck && bun run test && bun run knip",
+    "clean:legacy-claude-sessions": "rm -rf data/raw/*/claude-sessions",
     "clean:raw": "rm -rf data/raw",
     "fmt": "oxfmt",
     "fmt:check": "oxfmt --check",

@@ -8,9 +8,9 @@ import * as errore from 'errore'
 import { parseConfig } from '#src/config'
 import { buildRunLog } from '#src/ingest/log'
 import { run, type Source } from '#src/ingest/orchestrator'
-import { ingestLocalClaudeSessions } from '#src/ingest/sources/local-claude-sessions'
+import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
 import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
-import { ingestSshClaudeSessions } from '#src/ingest/sources/ssh-claude-sessions'
+import { ingestSshClaude } from '#src/ingest/sources/ssh-claude'
 
 const INGEST_WINDOW_HOURS = 48
 
@@ -32,13 +32,11 @@ async function main(): Promise<number> {
 
   const since = new Date(Date.now() - INGEST_WINDOW_HOURS * 60 * 60 * 1000)
   const sources: Source[] = [
-    ingestLocalClaudeSessions({
+    ingestLocalClaude({
       machine: cfg.machine,
       sourceDir: path.join(homedir(), '.claude', 'projects'),
     }),
-    ...cfg.remoteClaudeSessionsHosts.map((host) =>
-      ingestSshClaudeSessions({ host }),
-    ),
+    ...cfg.remoteClaudeHosts.map((host) => ingestSshClaude({ host })),
     ...cfg.firefoxProfiles.map((name) =>
       ingestLocalFirefox({
         machine: cfg.machine,

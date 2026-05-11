@@ -6,7 +6,7 @@ import * as errore from 'errore'
 
 import type { Source } from '#src/ingest/orchestrator'
 
-const SOURCE = 'claude-sessions'
+const SOURCE = 'claude'
 
 class SshSourceFailure extends errore.createTaggedError({
   name: 'SshSourceFailure',
@@ -19,11 +19,15 @@ function formatSinceForFind(d: Date): string {
   return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`
 }
 
-function buildRemoteCmd(since: Date): string {
+export function buildRemoteCmd(since: Date): string {
   const sinceStr = formatSinceForFind(since)
   return (
-    `cd ~/.claude && find projects -name '*.jsonl' ` +
-    `-newermt '${sinceStr}' -not -path '*/subagents/*' -print0 ` +
+    `cd ~/.claude && find projects ` +
+    `\\( ` +
+    `\\( -name '*.jsonl' -not -path '*/subagents/*' \\) ` +
+    `-o -path '*/memory/*.md' ` +
+    `\\) ` +
+    `-newermt '${sinceStr}' -print0 ` +
     `| tar --null -czf - -T -`
   )
 }
@@ -39,7 +43,11 @@ export async function runSshTarPipeline(opts: {
   upstream: string[]
   outDir: string
   host: string
-}): Promise<{ files_pulled: number; bytes: number }> {
+}): Promise<{
+  sessions_pulled: number
+  memories_pulled: number
+  bytes: number
+}> {
   const ssh = Bun.spawn(opts.upstream, {
     stdout: 'pipe',
     stderr: 'pipe',
@@ -74,18 +82,24 @@ export async function runSshTarPipeline(opts: {
     })
   }
 
-  const glob = new Glob('**/*.jsonl')
-  let filesPulled = 0
+  const glob = new Glob('**/*')
+  let sessionsPulled = 0
+  let memoriesPulled = 0
   let bytes = 0
   for await (const rel of glob.scan({ cwd: opts.outDir, onlyFiles: true })) {
     const info = await stat(path.join(opts.outDir, rel))
-    filesPulled += 1
     bytes += info.size
+    if (rel.endsWith('.jsonl')) sessionsPulled += 1
+    else if (rel.endsWith('.md')) memoriesPulled += 1
   }
-  return { files_pulled: filesPulled, bytes }
+  return {
+    sessions_pulled: sessionsPulled,
+    memories_pulled: memoriesPulled,
+    bytes,
+  }
 }
 
-export function ingestSshClaudeSessions(opts: { host: string }): Source {
+export function ingestSshClaude(opts: { host: string }): Source {
   return {
     machine: opts.host,
     source: SOURCE,

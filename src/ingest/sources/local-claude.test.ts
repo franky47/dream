@@ -11,7 +11,7 @@ import {
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { ingestLocalClaudeSessions } from '#src/ingest/sources/local-claude-sessions'
+import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
 
 let workDir: string
 let sourceDir: string
@@ -39,6 +39,13 @@ function writeJsonl(relPath: string, content: string, mtime: Date): void {
   utimesSync(full, mtime, mtime)
 }
 
+function writeMemory(relPath: string, content: string, mtime: Date): void {
+  const full = path.join(sourceDir, relPath)
+  mkdirSync(path.dirname(full), { recursive: true })
+  writeFileSync(full, content)
+  utimesSync(full, mtime, mtime)
+}
+
 function listFiles(dir: string): string[] {
   const out: string[] = []
   const walk = (d: string, rel: string): void => {
@@ -57,15 +64,15 @@ const IN_WINDOW = new Date('2026-05-09T12:00:00.000Z')
 const OUT_OF_WINDOW = new Date('2026-05-01T12:00:00.000Z')
 const SINCE = new Date('2026-05-08T00:00:00.000Z')
 
-describe('ingestLocalClaudeSessions', () => {
+describe('ingestLocalClaude', () => {
   test('exposes machine + source labels from input', () => {
-    const src = ingestLocalClaudeSessions({ machine: 'm4x', sourceDir })
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
     expect(src.machine).toBe('m4x')
-    expect(src.source).toBe('claude-sessions')
+    expect(src.source).toBe('claude')
   })
 
   test('uses the supplied machine label', () => {
-    const src = ingestLocalClaudeSessions({ machine: 'echo', sourceDir })
+    const src = ingestLocalClaude({ machine: 'echo', sourceDir })
     expect(src.machine).toBe('echo')
   })
 
@@ -81,13 +88,17 @@ describe('ingestLocalClaudeSessions', () => {
       OUT_OF_WINDOW,
     )
 
-    const src = ingestLocalClaudeSessions({ machine: 'm4x', sourceDir })
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
     const metrics = await src.pull({ outDir, since: SINCE })
 
     expect(listFiles(outDir)).toEqual([
       '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
     ])
-    expect(metrics).toEqual({ files_pulled: 1, bytes: 16 })
+    expect(metrics).toEqual({
+      sessions_pulled: 1,
+      memories_pulled: 0,
+      bytes: 16,
+    })
   })
 
   test('excludes paths under **/subagents/**', async () => {
@@ -102,13 +113,68 @@ describe('ingestLocalClaudeSessions', () => {
       IN_WINDOW,
     )
 
-    const src = ingestLocalClaudeSessions({ machine: 'm4x', sourceDir })
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
     const metrics = await src.pull({ outDir, since: SINCE })
 
     expect(listFiles(outDir)).toEqual([
       '-Users-franky-projA/dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl',
     ])
-    expect(metrics.files_pulled).toBe(1)
+    expect(metrics.sessions_pulled).toBe(1)
+  })
+
+  test('copies in-window memory/*.md files alongside sessions, including MEMORY.md', async () => {
+    writeJsonl(
+      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
+      '{"type":"user"}\n',
+      IN_WINDOW,
+    )
+    writeMemory(
+      '-Users-franky-projA/memory/feedback_foo.md',
+      '---\nname: foo\n---\nbody\n',
+      IN_WINDOW,
+    )
+    writeMemory(
+      '-Users-franky-projA/memory/MEMORY.md',
+      '- [foo](feedback_foo.md)\n',
+      IN_WINDOW,
+    )
+    writeMemory(
+      '-Users-franky-projA/memory/feedback_old.md',
+      'stale\n',
+      OUT_OF_WINDOW,
+    )
+
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    expect(listFiles(outDir)).toEqual([
+      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
+      '-Users-franky-projA/memory/MEMORY.md',
+      '-Users-franky-projA/memory/feedback_foo.md',
+    ])
+    expect(metrics.sessions_pulled).toBe(1)
+    expect(metrics.memories_pulled).toBe(2)
+  })
+
+  test('skips nested .md files under memory/ subdirectories (flat scope)', async () => {
+    writeMemory(
+      '-Users-franky-projA/memory/feedback_foo.md',
+      'top\n',
+      IN_WINDOW,
+    )
+    writeMemory(
+      '-Users-franky-projA/memory/sub/nested.md',
+      'nested\n',
+      IN_WINDOW,
+    )
+
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
+    const metrics = await src.pull({ outDir, since: SINCE })
+
+    expect(listFiles(outDir)).toEqual([
+      '-Users-franky-projA/memory/feedback_foo.md',
+    ])
+    expect(metrics.memories_pulled).toBe(1)
   })
 
   test('copied bytes match the source files', async () => {
@@ -118,7 +184,7 @@ describe('ingestLocalClaudeSessions', () => {
       content,
       IN_WINDOW,
     )
-    const src = ingestLocalClaudeSessions({ machine: 'm4x', sourceDir })
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
     const metrics = await src.pull({ outDir, since: SINCE })
 
     expect(metrics.bytes).toBe(Buffer.byteLength(content))

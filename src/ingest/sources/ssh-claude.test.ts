@@ -10,9 +10,10 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import {
-  ingestSshClaudeSessions,
+  buildRemoteCmd,
+  ingestSshClaude,
   runSshTarPipeline,
-} from '#src/ingest/sources/ssh-claude-sessions'
+} from '#src/ingest/sources/ssh-claude'
 
 let workDir: string
 let outDir: string
@@ -53,11 +54,22 @@ function listFiles(dir: string): string[] {
   return out.sort()
 }
 
-describe('ingestSshClaudeSessions', () => {
+describe('ingestSshClaude', () => {
   test('uses host as both ssh target and machine label', () => {
-    const src = ingestSshClaudeSessions({ host: 'echo' })
+    const src = ingestSshClaude({ host: 'echo' })
     expect(src.machine).toBe('echo')
-    expect(src.source).toBe('claude-sessions')
+    expect(src.source).toBe('claude')
+  })
+})
+
+describe('buildRemoteCmd', () => {
+  test('matches in-window jsonl and memory/*.md, excluding subagent jsonl', () => {
+    const cmd = buildRemoteCmd(new Date('2026-05-08T00:00:00.000Z'))
+    expect(cmd).toContain("-newermt '2026-05-08 00:00:00 UTC'")
+    expect(cmd).toContain("-name '*.jsonl'")
+    expect(cmd).toContain("-not -path '*/subagents/*'")
+    expect(cmd).toContain("-path '*/memory/*.md'")
+    expect(cmd).toContain('tar --null -czf - -T -')
   })
 })
 
@@ -76,10 +88,34 @@ describe('runSshTarPipeline', () => {
       '-Users-franky-projA/aaa.jsonl',
       '-Users-franky-projB/bbb.jsonl',
     ])
-    expect(result).toEqual({ files_pulled: 2, bytes: 32 })
+    expect(result).toEqual({
+      sessions_pulled: 2,
+      memories_pulled: 0,
+      bytes: 32,
+    })
     expect(
       readFileSync(path.join(outDir, '-Users-franky-projA/aaa.jsonl'), 'utf-8'),
     ).toBe('{"type":"user"}\n')
+  })
+
+  test('splits sessions vs memories in metrics when extracting a mixed payload', async () => {
+    writeFixture('-Users-franky-projA/aaa.jsonl', '{"type":"user"}\n')
+    writeFixture('-Users-franky-projA/memory/feedback_x.md', 'memo body\n')
+    writeFixture('-Users-franky-projA/memory/MEMORY.md', '- index\n')
+
+    const result = await runSshTarPipeline({
+      upstream: ['sh', '-c', `tar -czf - -C ${fixtureDir} .`],
+      outDir,
+      host: 'fake',
+    })
+
+    expect(listFiles(outDir).filter((f) => !f.startsWith('.'))).toEqual([
+      '-Users-franky-projA/aaa.jsonl',
+      '-Users-franky-projA/memory/MEMORY.md',
+      '-Users-franky-projA/memory/feedback_x.md',
+    ])
+    expect(result.sessions_pulled).toBe(1)
+    expect(result.memories_pulled).toBe(2)
   })
 
   test('handles an empty tar (no files matched on remote) as success', async () => {
@@ -88,7 +124,11 @@ describe('runSshTarPipeline', () => {
       outDir,
       host: 'fake',
     })
-    expect(result).toEqual({ files_pulled: 0, bytes: 0 })
+    expect(result).toEqual({
+      sessions_pulled: 0,
+      memories_pulled: 0,
+      bytes: 0,
+    })
   })
 
   test('throws SshSourceFailure when upstream exits non-zero', async () => {

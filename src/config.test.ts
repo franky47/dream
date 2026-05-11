@@ -34,28 +34,28 @@ describe('parseConfig', () => {
     expect(result.machine).toBe('m4x')
   })
 
-  test('remoteClaudeSessionsHosts is empty when DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS is unset', () => {
+  test('remoteClaudeHosts is empty when DREAM_REMOTE_CLAUDE_HOSTS is unset', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
     if (result instanceof Error) throw result
-    expect(result.remoteClaudeSessionsHosts).toEqual([])
+    expect(result.remoteClaudeHosts).toEqual([])
   })
 
-  test('parses comma-separated DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS', () => {
+  test('parses comma-separated DREAM_REMOTE_CLAUDE_HOSTS', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS: 'echo,alpha,beta',
+      DREAM_REMOTE_CLAUDE_HOSTS: 'echo,alpha,beta',
     })
     if (result instanceof Error) throw result
-    expect(result.remoteClaudeSessionsHosts).toEqual(['echo', 'alpha', 'beta'])
+    expect(result.remoteClaudeHosts).toEqual(['echo', 'alpha', 'beta'])
   })
 
-  test('trims whitespace and ignores empty entries in DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS', () => {
+  test('trims whitespace and ignores empty entries in DREAM_REMOTE_CLAUDE_HOSTS', () => {
     const result = parseConfig({
       DREAM_DATA_DIR: '/tmp/dream-data',
-      DREAM_REMOTE_CLAUDE_SESSIONS_HOSTS: ' echo , , alpha ,',
+      DREAM_REMOTE_CLAUDE_HOSTS: ' echo , , alpha ,',
     })
     if (result instanceof Error) throw result
-    expect(result.remoteClaudeSessionsHosts).toEqual(['echo', 'alpha'])
+    expect(result.remoteClaudeHosts).toEqual(['echo', 'alpha'])
   })
 
   test('firefoxProfiles is empty when DREAM_FIREFOX_PROFILES is unset', () => {

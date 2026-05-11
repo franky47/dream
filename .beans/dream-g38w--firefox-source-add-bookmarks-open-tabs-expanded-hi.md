@@ -18,6 +18,7 @@ All four child slices shipped:
 - `dream-7yv9` (local open-tabs): new `decodeMozLz4` + `readSessionStore` parse Mozilla's `mozLz40\0` + LE uint32 + raw lz4-block container, flatten `windows[].tabs[]`, pick `entries[index - 1]` with upper-bound clamp, emit local rows tagged with `device = cfg.machine`. Merged local + synced rows are sorted by `last_used` desc. Added `lz4js` + official `@types/lz4js`.
 
 Cross-cutting decisions:
+
 - Missing optional input files (`synced-tabs.db`, `sessionstore.jsonlz4`, `recovery.jsonlz4`) treated as zero-rows / header-only CSV rather than fatal — Firefox doesn't create these until the relevant feature is enabled, and the source must still ingest for users without Sync or with fresh profiles.
 - Every reader wraps its own failures as `LocalFirefoxFailure` with a stage discriminator: `query | bookmarks | open | synced_tabs | session_store | snapshot | mkdtemp | blocklist`.
 - Schemas tightened where corruption would otherwise hide (e.g. `sessionstore.tabs[].index` is `positive()`; bad records surface as tagged failures instead of silently picking entry 0).
