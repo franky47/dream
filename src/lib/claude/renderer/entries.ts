@@ -7,6 +7,7 @@ const textPartSchema = z.object({
 
 const toolUsePartSchema = z.object({
   type: z.literal('tool_use'),
+  id: z.string().optional(),
   name: z.string().optional(),
   input: z.record(z.string(), z.unknown()).optional(),
 })
@@ -17,6 +18,14 @@ const thinkingPartSchema = z.object({
 
 const toolResultPartSchema = z.object({
   type: z.literal('tool_result'),
+  tool_use_id: z.string().optional(),
+  content: z
+    .union([
+      z.string(),
+      z.array(z.object({ type: z.string(), text: z.string().optional() })),
+    ])
+    .optional(),
+  is_error: z.boolean().optional(),
 })
 
 const otherPartSchema = z.object({
@@ -100,4 +109,15 @@ export function entryText(entry: ClaudeEntry): string {
     if (c.type === 'text' && 'text' in c) parts.push(c.text)
   }
   return parts.join('\n')
+}
+
+export function toolResultContent(part: ContentPart): string {
+  if (part.type !== 'tool_result') return ''
+  if (!('content' in part) || part.content === undefined) return ''
+  if (typeof part.content === 'string') return part.content
+  const out: string[] = []
+  for (const c of part.content) {
+    if (c.type === 'text' && c.text !== undefined) out.push(c.text)
+  }
+  return out.join('\n')
 }

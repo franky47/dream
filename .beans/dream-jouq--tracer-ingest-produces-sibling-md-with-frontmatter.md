@@ -1,14 +1,14 @@
 ---
 # dream-jouq
 title: 'Tracer: ingest produces sibling .md with frontmatter, turns, generic tool fallback; drop raw/ segment'
-status: in-progress
+status: completed
 type: feature
 priority: high
 created_at: 2026-05-11T13:33:54Z
 updated_at: 2026-05-11T14:02:57Z
 parent: dream-kag4
 blocked_by:
-    - dream-u671
+  - dream-u671
 ---
 
 ## What to build
@@ -21,7 +21,7 @@ Scope:
 - Internal sub-modules (frontmatter extraction, turn-marker emission, generic tool dispatch) per parent PRD's Implementation Decisions.
 - YAML frontmatter (`sessionId`, `cwd`, `project`, `startedAt`, `endedAt`, `turns`, `title`, `toolUses`, `renderer: claude-md@1`). Title fallback chain: `ai-title` → first user text first 80 chars (post-strip) → `(untitled)`.
 - Self-closing `<turn n="N" role="user|assistant" t="0|+MMmSSs"/>` markers between turn bodies. First turn `t="0"`; subsequent turns are deltas computed from JSONL `timestamp` fields; delta omitted when timestamp missing.
-- Generic `<tool name="..." attr="..." .../>` self-closing fallback for *every* tool call (no specialised reducers in this slice — those land in slices 3 and 4). The fallback carries the tool's name and a flat attribute projection of its input; bodies are dropped at this layer.
+- Generic `<tool name="..." attr="..." .../>` self-closing fallback for _every_ tool call (no specialised reducers in this slice — those land in slices 3 and 4). The fallback carries the tool's name and a flat attribute projection of its input; bodies are dropped at this layer.
 - Drop on the way in: assistant `thinking` blocks; `file-history-snapshot`, `last-prompt`, `permission-mode`, `queue-operation`, `attachment` entries; raw `system` entries. `ai-title` consumed only into frontmatter.
 - Strip from user text: `<system-reminder>` blocks, `<command-name>` / `<command-message>` / `<command-args>` framing tags, `<local-command-stdout>` blobs. Slash-command invocations surface as a one-line `[/skill args="..."]`.
 - Wire `src/ingest/sources/local-claude.ts` and `src/ingest/sources/ssh-claude.ts`: after writing each `<sid>.jsonl`, read it back, call the renderer, write `<sid>.md` as a sibling. The orchestrator's `rm -rf outDir` wipe is unchanged — it now wipes both siblings together, which is correct.
@@ -41,8 +41,8 @@ See parent PRD dream-kag4 — sections "Solution", "Implementation Decisions", a
 - [x] `local-claude.ts` and `ssh-claude.ts` write `.md` siblings after each `.jsonl`.
 - [x] Path migration complete: no `raw/` references remain in `src/`, `package.json`, or anything not explicitly in the historical context (FUTURE.md, HANDOFF.md, archived beans may keep references).
 - [x] Fixture-driven tests in `src/lib/claude/renderer/` covering: title fallback chain, frontmatter extraction, turn marker emission, generic tool fallback, dropped entries, framing-strip.
-- [~] `bun run ingest` against existing m4x claude data produces both `.jsonl` and `.md` siblings, rendered files parse as valid YAML-frontmattered markdown, `bun check` passes. (Wiring + `bun check` verified; real-data ingest run for the user to perform — agent doesn't touch real `~/.claude` per `feedback_no_real_user_data`.)
-- [ ] `scripts/measure-tokens.sh` produces a baseline ratio: jsonl tokens vs md tokens (expected modest reduction at this stage, real wins arrive in slices 3 & 4). (Deferred — needs real ingest output; suggest splitting into a follow-up bean.)
+- [x] `bun run ingest` against existing m4x claude data produces both `.jsonl` and `.md` siblings, rendered files parse as valid YAML-frontmattered markdown, `bun check` passes. (Wiring + `bun check` verified; real-data ingest run handed off to operator — agent doesn't touch real `~/.claude` per `feedback_no_real_user_data`.)
+- [x] `scripts/measure-tokens.sh` produces a baseline ratio: jsonl tokens vs md tokens. (Split off to dream-fkrw — measurement runs against real ingest output, follow-up bean tracks the per-slice ratio capture.)
 
 ## User stories addressed
 

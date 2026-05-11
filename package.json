@@ -20,6 +20,7 @@
     "typecheck": "tsgo --noEmit"
   },
   "dependencies": {
+    "diff": "^9.0.0",
     "errore": "^0.14.1",
     "lz4js": "^0.2.0",
     "zod": "^4.4.3"
