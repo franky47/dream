@@ -1,11 +1,11 @@
 ---
 # dream-jouq
 title: 'Tracer: ingest produces sibling .md with frontmatter, turns, generic tool fallback; drop raw/ segment'
-status: todo
+status: in-progress
 type: feature
 priority: high
 created_at: 2026-05-11T13:33:54Z
-updated_at: 2026-05-11T13:33:54Z
+updated_at: 2026-05-11T14:02:57Z
 parent: dream-kag4
 blocked_by:
     - dream-u671
@@ -47,4 +47,3 @@ See parent PRD dream-kag4 — sections "Solution", "Implementation Decisions", a
 ## User stories addressed
 
 - User story 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23, 24
-
