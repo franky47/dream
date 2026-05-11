@@ -3,7 +3,7 @@
   "private": true,
   "imports": {
     "#src/*": "./src/*.ts",
-    "#lib/opencode": "./src/lib/opencode/index.ts",
+    "#lib/opencode/pull": "./src/lib/opencode/pull/index.ts",
     "#lib/*": "./src/lib/*.ts"
   },
   "scripts": {

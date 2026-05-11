@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite'
 import { homedir } from 'node:os'
 import path from 'node:path'
 
-import { projectRows, splitJsonlToSessionFiles } from '#lib/opencode'
+import { projectRows, splitJsonlToSessionFiles } from '#lib/opencode/pull'
 import type { Source } from '#src/ingest/orchestrator'
 
 const DEFAULT_DB_PATH = path.join(

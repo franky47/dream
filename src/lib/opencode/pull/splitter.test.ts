@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { splitJsonlToSessionFiles } from '#lib/opencode/splitter'
+import { splitJsonlToSessionFiles } from './splitter.ts'
 
 let outDir: string
 

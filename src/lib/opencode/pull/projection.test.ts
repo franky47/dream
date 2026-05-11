@@ -6,7 +6,7 @@ import path from 'node:path'
 
 import { z } from 'zod'
 
-import { buildProjectionSql, projectRows } from '#lib/opencode/projection'
+import { buildProjectionSql, projectRows } from './projection.ts'
 
 const rowSchema = z.record(z.string(), z.unknown())
 function parseRows(rows: ReadonlyArray<string>): Record<string, unknown>[] {

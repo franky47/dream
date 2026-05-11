@@ -1,6 +1,9 @@
 import * as errore from 'errore'
 
-import { buildProjectionSql, splitJsonlToSessionFiles } from '#lib/opencode'
+import {
+  buildProjectionSql,
+  splitJsonlToSessionFiles,
+} from '#lib/opencode/pull'
 import type { Source } from '#src/ingest/orchestrator'
 
 const SOURCE = 'opencode'
