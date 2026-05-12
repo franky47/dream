@@ -17,66 +17,28 @@ import {
 } from './tools.ts'
 
 describe('renderBashTool', () => {
-  test('short output renders cmd + exit attrs and body verbatim', () => {
+  test('self-closes with cmd attr; no error attr on success', () => {
     const out = renderBashTool(
       { name: 'Bash', input: { command: 'ls /tmp' } },
       { content: 'a\nb\nc', isError: false },
     )
-    expect(out).toContain('<tool name="Bash" cmd="ls /tmp" exit="0">')
-    expect(out).toContain('a\nb\nc')
-    expect(out.endsWith('</tool>')).toBe(true)
+    expect(out).toBe('<tool name="Bash" cmd="ls /tmp"/>')
   })
 
-  test('non-zero exit when tool_result is_error', () => {
+  test('emits error="1" when is_error', () => {
     const out = renderBashTool(
       { name: 'Bash', input: { command: 'false' } },
       { content: 'oops', isError: true },
     )
-    expect(out).toContain('exit="1"')
-    expect(out).toContain('oops')
+    expect(out).toBe('<tool name="Bash" cmd="false" error="1"/>')
   })
 
-  test('exit attr omitted when no result available', () => {
+  test('self-closes with cmd attr when no result available', () => {
     const out = renderBashTool(
       { name: 'Bash', input: { command: 'ls' } },
       undefined,
     )
-    expect(out).not.toContain('exit=')
-    expect(out).toContain('<tool name="Bash" cmd="ls"/>')
-  })
-
-  test('truncates past 200 lines: head 40 + elision + tail 40 (tail preserved)', () => {
-    const lines = Array.from({ length: 500 }, (_, i) => `line${i}`)
-    const out = renderBashTool(
-      { name: 'Bash', input: { command: 'seq 500' } },
-      { content: lines.join('\n'), isError: false },
-    )
-    expect(out).toContain('line0')
-    expect(out).toContain('line39')
-    expect(out).not.toContain('line40\n')
-    expect(out).toContain('line499')
-    expect(out).toContain('line460')
-    expect(out).toMatch(/elided/i)
-  })
-
-  test('truncates past 8 KB even when line count is small', () => {
-    const longLine = 'x'.repeat(9000)
-    const out = renderBashTool(
-      { name: 'Bash', input: { command: 'cat big' } },
-      { content: longLine, isError: false },
-    )
-    expect(out).toMatch(/elided/i)
-  })
-
-  test('preserves stderr tail through truncation for failed long commands', () => {
-    const bulk = Array.from({ length: 300 }, (_, i) => `out${i}`).join('\n')
-    const stderrTail = '\nERROR: boom at line 42'
-    const out = renderBashTool(
-      { name: 'Bash', input: { command: 'cargo test' } },
-      { content: bulk + stderrTail, isError: true },
-    )
-    expect(out).toContain('ERROR: boom at line 42')
-    expect(out).toContain('exit="1"')
+    expect(out).toBe('<tool name="Bash" cmd="ls"/>')
   })
 
   test('escapes double quotes inside cmd attribute', () => {
@@ -89,104 +51,67 @@ describe('renderBashTool', () => {
 })
 
 describe('renderWriteTool', () => {
-  test('short body renders verbatim with lines + bytes attrs', () => {
+  test('self-closes with file + lines + bytes attrs; drops content body', () => {
     const content = 'one\ntwo\nthree\n'
     const out = renderWriteTool({
       name: 'Write',
       input: { file_path: '/x/y.ts', content },
     })
-    expect(out).toContain(
-      '<tool name="Write" file="/x/y.ts" lines="3" bytes="14">',
-    )
-    expect(out).toContain('one\ntwo\nthree')
-    expect(out.endsWith('</tool>')).toBe(true)
+    expect(out).toBe('<tool name="Write" file="/x/y.ts" lines="3" bytes="14"/>')
   })
 
-  test('past 60 lines truncates head 30 + tail 10 with elision', () => {
+  test('large file: attrs only, no body', () => {
     const lines = Array.from({ length: 100 }, (_, i) => `L${i}`)
+    const content = lines.join('\n')
     const out = renderWriteTool({
       name: 'Write',
-      input: { file_path: '/x/big.ts', content: lines.join('\n') },
+      input: { file_path: '/x/big.ts', content },
     })
     expect(out).toContain('lines="100"')
-    expect(out).toContain('L0')
-    expect(out).toContain('L29')
-    expect(out).not.toContain('L30\n')
-    expect(out).toContain('L99')
-    expect(out).toContain('L90')
-    expect(out).toMatch(/elided/i)
+    expect(out).not.toContain('L0')
+    expect(out).not.toContain('L99')
+    expect(out.endsWith('/>')).toBe(true)
   })
 
-  test('exactly 60 lines renders verbatim (boundary)', () => {
-    const lines = Array.from({ length: 60 }, (_, i) => `L${i}`)
+  test('escapes quotes in file attr', () => {
     const out = renderWriteTool({
       name: 'Write',
-      input: { file_path: '/x/edge.ts', content: lines.join('\n') },
+      input: { file_path: '/x/"weird".ts', content: 'x' },
     })
-    expect(out).not.toMatch(/elided/i)
-    expect(out).toContain('L59')
+    expect(out).toContain('file="/x/&quot;weird&quot;.ts"')
   })
 })
 
 describe('renderEditTool', () => {
-  test('single edit emits file + patches="1" attrs and a +/- diff body', () => {
-    const out = renderEditTool([
-      {
-        name: 'Edit',
-        input: {
-          file_path: '/x/y.ts',
-          old_string: 'foo\nbar\nbaz',
-          new_string: 'foo\nBAR\nbaz',
-        },
-      },
-    ])
-    expect(out).toContain('<tool name="Edit" file="/x/y.ts" patches="1">')
-    expect(out).toContain('-bar')
-    expect(out).toContain('+BAR')
-    expect(out).toContain(' foo')
-    expect(out).toContain(' baz')
-    expect(out).not.toMatch(/^@@/m)
-    expect(out.endsWith('</tool>')).toBe(true)
+  test('single edit: self-closing with file + patches="1" + added/removed counts', () => {
+    const out = renderEditTool('/x/y.ts', {
+      patches: 1,
+      added: 1,
+      removed: 1,
+    })
+    expect(out).toBe(
+      '<tool name="Edit" file="/x/y.ts" patches="1" added="1" removed="1"/>',
+    )
   })
 
-  test('coalesced edits emit patches="N" with diffs back-to-back', () => {
-    const out = renderEditTool([
-      {
-        name: 'Edit',
-        input: {
-          file_path: '/x/y.ts',
-          old_string: 'one',
-          new_string: 'ONE',
-        },
-      },
-      {
-        name: 'Edit',
-        input: {
-          file_path: '/x/y.ts',
-          old_string: 'two',
-          new_string: 'TWO',
-        },
-      },
-    ])
-    expect(out).toContain('patches="2"')
-    expect(out).toContain('-one')
-    expect(out).toContain('+ONE')
-    expect(out).toContain('-two')
-    expect(out).toContain('+TWO')
+  test('multi-patch consolidated: counts sum across patches', () => {
+    const out = renderEditTool('/x/y.ts', {
+      patches: 3,
+      added: 12,
+      removed: 42,
+    })
+    expect(out).toBe(
+      '<tool name="Edit" file="/x/y.ts" patches="3" added="12" removed="42"/>',
+    )
   })
 
-  test('no @@ hunk headers in diff body', () => {
-    const out = renderEditTool([
-      {
-        name: 'Edit',
-        input: {
-          file_path: '/x/y.ts',
-          old_string: 'a\nb\nc\nd\ne',
-          new_string: 'a\nb\nC\nd\ne',
-        },
-      },
-    ])
-    expect(out).not.toContain('@@')
+  test('escapes quotes in file attr', () => {
+    const out = renderEditTool('/x/"q".ts', {
+      patches: 1,
+      added: 0,
+      removed: 0,
+    })
+    expect(out).toContain('file="/x/&quot;q&quot;.ts"')
   })
 })
 
@@ -271,42 +196,31 @@ describe('renderWebSearchTool', () => {
 })
 
 describe('renderAgentTool', () => {
-  test('emits description attr and body with prompt + result', () => {
-    const out = renderAgentTool(
-      {
-        name: 'Agent',
-        input: { description: 'Find bug', prompt: 'Investigate X' },
-      },
-      { content: 'Found it in foo.ts', isError: false },
-    )
-    expect(out).toContain('<tool name="Agent" description="Find bug">')
-    expect(out).toContain('Investigate X')
-    expect(out).toContain('Found it in foo.ts')
-    expect(out.endsWith('</tool>')).toBe(true)
+  test('self-closes with description attr; drops prompt and result', () => {
+    const out = renderAgentTool({
+      name: 'Agent',
+      input: { description: 'Find bug', prompt: 'Investigate X' },
+    })
+    expect(out).toBe('<tool name="Agent" description="Find bug"/>')
   })
 
-  test('truncates long prompt with head/tail policy', () => {
+  test('drops verbose prompt/result entirely', () => {
     const prompt = Array.from({ length: 500 }, (_, i) => `p${i}`).join('\n')
-    const result = Array.from({ length: 500 }, (_, i) => `r${i}`).join('\n')
-    const out = renderAgentTool(
-      { name: 'Agent', input: { description: 'big', prompt } },
-      { content: result, isError: false },
-    )
-    expect(out).toContain('p0')
-    expect(out).toContain('r0')
-    expect(out).toContain('p499')
-    expect(out).toContain('r499')
-    expect(out).toMatch(/elided/i)
+    const out = renderAgentTool({
+      name: 'Agent',
+      input: { description: 'big', prompt },
+    })
+    expect(out).not.toContain('p0')
+    expect(out).not.toContain('p499')
+    expect(out.endsWith('/>')).toBe(true)
   })
 
-  test('no result yields tool with prompt only', () => {
-    const out = renderAgentTool(
-      { name: 'Agent', input: { description: 'd', prompt: 'P' } },
-      undefined,
-    )
-    expect(out).toContain('description="d"')
-    expect(out).toContain('P')
-    expect(out).not.toContain('isError')
+  test('escapes quotes in description', () => {
+    const out = renderAgentTool({
+      name: 'Agent',
+      input: { description: 'has "quotes"', prompt: '' },
+    })
+    expect(out).toContain('description="has &quot;quotes&quot;"')
   })
 })
 
@@ -411,14 +325,12 @@ describe('renderAskUserQuestionTool', () => {
 })
 
 describe('renderUnknownTool', () => {
-  test('preserves generic shape with flat attrs and body when result present', () => {
+  test('self-closes with flat attrs; no error attr on success', () => {
     const out = renderUnknownTool(
       { name: 'CustomTool', input: { foo: 'bar', n: 3 } },
       { content: 'hello', isError: false },
     )
-    expect(out).toContain('<tool name="CustomTool" foo="bar" n="3">')
-    expect(out).toContain('hello')
-    expect(out.endsWith('</tool>')).toBe(true)
+    expect(out).toBe('<tool name="CustomTool" foo="bar" n="3"/>')
   })
 
   test('self-closes when no result', () => {
@@ -429,14 +341,22 @@ describe('renderUnknownTool', () => {
     expect(out).toBe('<tool name="CustomTool" foo="bar"/>')
   })
 
-  test('truncates large body with head/tail policy', () => {
+  test('emits error="1" when is_error', () => {
+    const out = renderUnknownTool(
+      { name: 'CustomTool', input: { foo: 'bar' } },
+      { content: 'oops', isError: true },
+    )
+    expect(out).toBe('<tool name="CustomTool" foo="bar" error="1"/>')
+  })
+
+  test('large result body is not embedded', () => {
     const big = Array.from({ length: 500 }, (_, i) => `L${i}`).join('\n')
     const out = renderUnknownTool(
       { name: 'CustomTool', input: {} },
       { content: big, isError: false },
     )
-    expect(out).toContain('L0')
-    expect(out).toContain('L499')
-    expect(out).toMatch(/elided/i)
+    expect(out).not.toContain('L0')
+    expect(out).not.toContain('L499')
+    expect(out.endsWith('/>')).toBe(true)
   })
 })

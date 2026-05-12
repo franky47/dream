@@ -9,8 +9,9 @@ import {
   toolResultContent,
 } from './entries.ts'
 import { extractFrontmatter, frontmatterToYaml } from './frontmatter.ts'
-import { applyPostPasses } from './post-pass.ts'
 import {
+  type EditStats,
+  editStats,
   renderAgentTool,
   renderAskUserQuestionTool,
   renderBashTool,
@@ -25,7 +26,6 @@ import {
   renderWebSearchTool,
   renderWriteTool,
   type ToolResult,
-  type ToolUseInput,
 } from './tools.ts'
 
 const DROPPED_ENTRY_TYPES: ReadonlySet<string> = new Set([
@@ -39,6 +39,10 @@ const DROPPED_ENTRY_TYPES: ReadonlySet<string> = new Set([
 ])
 
 function asFilePath(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+function asString(v: unknown): string {
   return typeof v === 'string' ? v : ''
 }
 
@@ -106,10 +110,10 @@ function collectToolUses(entries: ReadonlyArray<ClaudeEntry>): ToolUseRef[] {
 }
 
 function computeEditGroups(uses: ReadonlyArray<ToolUseRef>): {
-  headGroup: Map<string, ToolUseInput[]>
+  headStats: Map<string, EditStats>
   absorbed: Set<string>
 } {
-  const headGroup = new Map<string, ToolUseInput[]>()
+  const headStats = new Map<string, EditStats>()
   const absorbed = new Set<string>()
   let i = 0
   while (i < uses.length) {
@@ -119,7 +123,13 @@ function computeEditGroups(uses: ReadonlyArray<ToolUseRef>): {
       continue
     }
     const file = asFilePath(u.input.file_path)
-    const group: ToolUseInput[] = [{ name: u.name, input: u.input }]
+    const first = editStats(
+      asString(u.input.old_string),
+      asString(u.input.new_string),
+    )
+    let added = first.added
+    let removed = first.removed
+    let patches = 1
     let j = i + 1
     while (j < uses.length) {
       const next = uses[j]
@@ -130,23 +140,27 @@ function computeEditGroups(uses: ReadonlyArray<ToolUseRef>): {
       ) {
         break
       }
-      group.push({ name: next.name, input: next.input })
+      const s = editStats(
+        asString(next.input.old_string),
+        asString(next.input.new_string),
+      )
+      added += s.added
+      removed += s.removed
+      patches += 1
       if (next.id !== null) absorbed.add(next.id)
       j += 1
     }
-    headGroup.set(u.id, group)
+    headStats.set(u.id, { patches, added, removed })
     i = j
   }
-  return { headGroup, absorbed }
+  return { headStats, absorbed }
 }
 
 interface RenderState {
   results: ReadonlyMap<string, ToolResult>
-  editGroups: ReadonlyMap<string, ToolUseInput[]>
+  editStats: ReadonlyMap<string, EditStats>
   absorbed: ReadonlySet<string>
-  bodyDedup: Map<string, number>
   lastTodos: TodoItem[] | null
-  currentTurn: number
 }
 
 function resultFor(
@@ -156,88 +170,56 @@ function resultFor(
   return use.id !== null ? state.results.get(use.id) : undefined
 }
 
-interface Reduced {
-  xml: string
-  // True when the body comes from a tool_result; eligible for cross-turn dedup.
-  resultBacked: boolean
-}
-
-function reduceToolUse(use: ToolUseRef, state: RenderState): Reduced {
-  const input: ToolUseInput = { name: use.name, input: use.input }
+function dispatchToolUse(use: ToolUseRef, state: RenderState): string {
   if (use.name === 'Edit') {
-    if (use.id !== null && state.absorbed.has(use.id)) {
-      return { xml: '', resultBacked: false }
-    }
-    const group = use.id !== null ? state.editGroups.get(use.id) : undefined
-    return { xml: renderEditTool(group ?? [input]), resultBacked: false }
+    if (use.id !== null && state.absorbed.has(use.id)) return ''
+    const stats =
+      (use.id !== null ? state.editStats.get(use.id) : undefined) ??
+      (() => {
+        const s = editStats(
+          asString(use.input.old_string),
+          asString(use.input.new_string),
+        )
+        return { patches: 1, added: s.added, removed: s.removed }
+      })()
+    return renderEditTool(asFilePath(use.input.file_path), stats)
   }
-  if (use.name === 'Bash') {
-    return {
-      xml: renderBashTool(input, resultFor(use, state)),
-      resultBacked: true,
-    }
-  }
-  if (use.name === 'Write') {
-    return { xml: renderWriteTool(input), resultBacked: false }
-  }
+  if (use.name === 'Bash')
+    return renderBashTool(
+      { name: use.name, input: use.input },
+      resultFor(use, state),
+    )
+  if (use.name === 'Write')
+    return renderWriteTool({ name: use.name, input: use.input })
   if (use.name === 'Read')
-    return { xml: renderReadTool(input), resultBacked: false }
+    return renderReadTool({ name: use.name, input: use.input })
   if (use.name === 'Glob')
-    return { xml: renderGlobTool(input), resultBacked: false }
+    return renderGlobTool({ name: use.name, input: use.input })
   if (use.name === 'Grep')
-    return { xml: renderGrepTool(input), resultBacked: false }
+    return renderGrepTool({ name: use.name, input: use.input })
   if (use.name === 'Skill')
-    return { xml: renderSkillTool(input), resultBacked: false }
+    return renderSkillTool({ name: use.name, input: use.input })
   if (use.name === 'WebFetch')
-    return { xml: renderWebFetchTool(input), resultBacked: false }
+    return renderWebFetchTool({ name: use.name, input: use.input })
   if (use.name === 'WebSearch')
-    return { xml: renderWebSearchTool(input), resultBacked: false }
-  if (use.name === 'Agent') {
-    return {
-      xml: renderAgentTool(input, resultFor(use, state)),
-      resultBacked: true,
-    }
-  }
-  if (use.name === 'AskUserQuestion') {
-    return {
-      xml: renderAskUserQuestionTool(input, resultFor(use, state)),
-      resultBacked: true,
-    }
-  }
+    return renderWebSearchTool({ name: use.name, input: use.input })
+  if (use.name === 'Agent')
+    return renderAgentTool({ name: use.name, input: use.input })
+  if (use.name === 'AskUserQuestion')
+    return renderAskUserQuestionTool(
+      { name: use.name, input: use.input },
+      resultFor(use, state),
+    )
   if (use.name === 'TodoWrite') {
     const current = asTodos(use.input.todos)
     const xml = renderTodoWriteTool(state.lastTodos, current)
     state.lastTodos = current
-    return { xml, resultBacked: false }
+    return xml
   }
-  return {
-    xml: renderUnknownTool(input, resultFor(use, state)),
-    resultBacked: true,
-  }
-}
-
-function postProcessRendered(reduced: Reduced, state: RenderState): string {
-  const { xml, resultBacked } = reduced
-  if (xml.length === 0) return xml
-  if (xml.endsWith('/>')) return xml
-  const lines = xml.split('\n')
-  if (lines.length < 3) return xml
-  if (lines[lines.length - 1] !== '</tool>') return xml
-  const head = lines[0]
-  const body = lines.slice(1, -1).join('\n')
-  const cleaned = applyPostPasses(body)
-  if (resultBacked && cleaned.length > 0) {
-    const seenTurn = state.bodyDedup.get(cleaned)
-    if (seenTurn !== undefined) {
-      return `${head}\n(same output as turn ${seenTurn})\n</tool>`
-    }
-    state.bodyDedup.set(cleaned, state.currentTurn)
-  }
-  return `${head}\n${cleaned}\n</tool>`
-}
-
-function dispatchToolUse(use: ToolUseRef, state: RenderState): string {
-  return postProcessRendered(reduceToolUse(use, state), state)
+  return renderUnknownTool(
+    { name: use.name, input: use.input },
+    resultFor(use, state),
+  )
 }
 
 function renderAssistantBody(
@@ -290,14 +272,12 @@ export function renderClaudeSession(jsonlText: string): string {
 
   const results = collectToolResults(entries)
   const uses = collectToolUses(entries)
-  const { headGroup, absorbed } = computeEditGroups(uses)
+  const { headStats, absorbed } = computeEditGroups(uses)
   const state: RenderState = {
     results,
-    editGroups: headGroup,
+    editStats: headStats,
     absorbed,
-    bodyDedup: new Map(),
     lastTodos: null,
-    currentTurn: 0,
   }
   const dispatch = (u: ToolUseRef): string => dispatchToolUse(u, state)
 
@@ -312,7 +292,6 @@ export function renderClaudeSession(jsonlText: string): string {
   const bodyParts: string[] = []
   for (const e of turnable) {
     turnCount += 1
-    state.currentTurn = turnCount
     const role = e.type === 'user' ? 'user' : 'assistant'
     let t: string | null
     if (e.timestamp === undefined) {

@@ -11,17 +11,6 @@ export interface ToolResult {
   isError: boolean
 }
 
-const BASH_MAX_LINES = 200
-const BASH_MAX_BYTES = 8 * 1024
-const BASH_HEAD_LINES = 40
-const BASH_TAIL_LINES = 40
-const BASH_HEAD_BYTES = 4 * 1024
-const BASH_TAIL_BYTES = 4 * 1024
-
-const WRITE_VERBATIM_LINES = 60
-const WRITE_HEAD_LINES = 30
-const WRITE_TAIL_LINES = 10
-
 function asString(v: unknown): string {
   return typeof v === 'string' ? v : ''
 }
@@ -41,64 +30,14 @@ function countLines(s: string): number {
   return n
 }
 
-function trimTrailingNewline(s: string): string {
-  return s.endsWith('\n') ? s.slice(0, -1) : s
-}
-
-function headTailLines(text: string, headN: number, tailN: number): string {
-  const lines = text.split('\n')
-  if (lines.length <= headN + tailN) return text
-  const head = lines.slice(0, headN)
-  const tail = lines.slice(lines.length - tailN)
-  const elided = lines.length - headN - tailN
-  return [...head, `... (${elided} lines elided)`, ...tail].join('\n')
-}
-
-function headTailBytes(
-  text: string,
-  headBytes: number,
-  tailBytes: number,
-): string {
-  const buf = Buffer.from(text, 'utf8')
-  if (buf.length <= headBytes + tailBytes) return text
-  const head = buf.subarray(0, headBytes).toString('utf8')
-  const tail = buf.subarray(buf.length - tailBytes).toString('utf8')
-  const elided = buf.length - headBytes - tailBytes
-  return `${head}\n... (${elided} bytes elided)\n${tail}`
-}
-
-function bashBody(content: string): string {
-  const lineCount = countLines(content)
-  const byteLen = Buffer.byteLength(content, 'utf8')
-  const overLines = lineCount > BASH_MAX_LINES
-  const overBytes = byteLen > BASH_MAX_BYTES
-  if (!overLines && !overBytes) return trimTrailingNewline(content)
-  if (overLines) {
-    return headTailLines(
-      trimTrailingNewline(content),
-      BASH_HEAD_LINES,
-      BASH_TAIL_LINES,
-    )
-  }
-  return headTailBytes(
-    trimTrailingNewline(content),
-    BASH_HEAD_BYTES,
-    BASH_TAIL_BYTES,
-  )
-}
-
 export function renderBashTool(
   use: ToolUseInput,
   result: ToolResult | undefined,
 ): string {
   const cmd = asString(use.input.command)
   const cmdAttr = `cmd="${attrEscape(cmd)}"`
-  if (result === undefined) {
-    return `<tool name="Bash" ${cmdAttr}/>`
-  }
-  const exit = result.isError ? 1 : 0
-  const body = bashBody(result.content)
-  return `<tool name="Bash" ${cmdAttr} exit="${exit}">\n${body}\n</tool>`
+  const errorAttr = result?.isError === true ? ' error="1"' : ''
+  return `<tool name="Bash" ${cmdAttr}${errorAttr}/>`
 }
 
 export function renderWriteTool(use: ToolUseInput): string {
@@ -106,37 +45,33 @@ export function renderWriteTool(use: ToolUseInput): string {
   const content = asString(use.input.content)
   const lines = countLines(content)
   const bytes = Buffer.byteLength(content, 'utf8')
-  const fileAttr = `file="${attrEscape(file)}"`
-  const head = `<tool name="Write" ${fileAttr} lines="${lines}" bytes="${bytes}">`
-  const trimmed = trimTrailingNewline(content)
-  const body =
-    lines <= WRITE_VERBATIM_LINES
-      ? trimmed
-      : headTailLines(trimmed, WRITE_HEAD_LINES, WRITE_TAIL_LINES)
-  return `${head}\n${body}\n</tool>`
+  return `<tool name="Write" file="${attrEscape(file)}" lines="${lines}" bytes="${bytes}"/>`
 }
 
-function unifiedDiffBody(oldStr: string, newStr: string): string {
+export interface EditStats {
+  patches: number
+  added: number
+  removed: number
+}
+
+export function editStats(
+  oldStr: string,
+  newStr: string,
+): { added: number; removed: number } {
   const changes = diffLines(oldStr, newStr)
-  const out: string[] = []
+  let added = 0
+  let removed = 0
   for (const c of changes) {
-    const prefix = c.added ? '+' : c.removed ? '-' : ' '
     const lines = c.value.split('\n')
     if (lines[lines.length - 1] === '') lines.pop()
-    for (const line of lines) out.push(prefix + line)
+    if (c.added) added += lines.length
+    else if (c.removed) removed += lines.length
   }
-  return out.join('\n')
+  return { added, removed }
 }
 
-export function renderEditTool(uses: ToolUseInput[]): string {
-  const first = uses[0]
-  if (first === undefined) return ''
-  const file = asString(first.input.file_path)
-  const fileAttr = `file="${attrEscape(file)}"`
-  const diffs = uses.map((u) =>
-    unifiedDiffBody(asString(u.input.old_string), asString(u.input.new_string)),
-  )
-  return `<tool name="Edit" ${fileAttr} patches="${uses.length}">\n${diffs.join('\n')}\n</tool>`
+export function renderEditTool(file: string, stats: EditStats): string {
+  return `<tool name="Edit" file="${attrEscape(file)}" patches="${stats.patches}" added="${stats.added}" removed="${stats.removed}"/>`
 }
 
 function selfClosing(name: string, attr: string, value: string): string {
@@ -167,29 +102,9 @@ export function renderWebSearchTool(use: ToolUseInput): string {
   return selfClosing('WebSearch', 'query', asString(use.input.query))
 }
 
-const AGENT_MAX_LINES = 200
-const AGENT_HEAD_LINES = 40
-const AGENT_TAIL_LINES = 40
-
-function agentTruncate(text: string): string {
-  const trimmed = trimTrailingNewline(text)
-  if (countLines(trimmed) <= AGENT_MAX_LINES) return trimmed
-  return headTailLines(trimmed, AGENT_HEAD_LINES, AGENT_TAIL_LINES)
-}
-
-export function renderAgentTool(
-  use: ToolUseInput,
-  result: ToolResult | undefined,
-): string {
+export function renderAgentTool(use: ToolUseInput): string {
   const description = asString(use.input.description)
-  const prompt = asString(use.input.prompt)
-  const head = `<tool name="Agent" description="${attrEscape(description)}">`
-  const promptBody = agentTruncate(prompt)
-  if (result === undefined) {
-    return `${head}\n${promptBody}\n</tool>`
-  }
-  const resultBody = agentTruncate(result.content)
-  return `${head}\n${promptBody}\n---\n${resultBody}\n</tool>`
+  return `<tool name="Agent" description="${attrEscape(description)}"/>`
 }
 
 interface TodoItem {
@@ -261,16 +176,6 @@ export function renderAskUserQuestionTool(
   return `<tool name="AskUserQuestion">\n${lines.join('\n')}\n</tool>`
 }
 
-const UNKNOWN_MAX_LINES = 200
-const UNKNOWN_HEAD_LINES = 40
-const UNKNOWN_TAIL_LINES = 40
-
-function unknownTruncate(text: string): string {
-  const trimmed = trimTrailingNewline(text)
-  if (countLines(trimmed) <= UNKNOWN_MAX_LINES) return trimmed
-  return headTailLines(trimmed, UNKNOWN_HEAD_LINES, UNKNOWN_TAIL_LINES)
-}
-
 function flatAttrProjection(input: Record<string, unknown>): string {
   const parts: string[] = []
   for (const [k, v] of Object.entries(input)) {
@@ -286,8 +191,7 @@ export function renderUnknownTool(
   result: ToolResult | undefined,
 ): string {
   const attrs = flatAttrProjection(use.input)
-  const head = `<tool name="${attrEscape(use.name)}"${attrs.length > 0 ? ` ${attrs}` : ''}`
-  if (result === undefined) return `${head}/>`
-  const body = unknownTruncate(result.content)
-  return `${head}>\n${body}\n</tool>`
+  const errorAttr = result?.isError === true ? ' error="1"' : ''
+  const attrPart = attrs.length > 0 ? ` ${attrs}` : ''
+  return `<tool name="${attrEscape(use.name)}"${attrPart}${errorAttr}/>`
 }
