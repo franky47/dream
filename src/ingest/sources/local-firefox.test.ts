@@ -16,6 +16,7 @@ import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 
 let workDir: string
 let profileDir: string
+let dataDir: string
 let outDir: string
 let placesPath: string
 let blocklistPath: string
@@ -25,6 +26,9 @@ function writeBlocklist(contents: string): void {
 }
 
 const SINCE = new Date('2026-05-08T00:00:00.000Z')
+const UNTIL = new Date('2026-05-10T00:00:00.000Z')
+// firefox routes its CSVs into data/<utcDay(until - 1ms)>/<machine>/firefox.
+const BUCKET = '2026-05-09/m4x/firefox'
 
 function microsSinceEpoch(d: Date): number {
   return d.getTime() * 1000
@@ -256,9 +260,10 @@ beforeEach(() => {
     `dream-firefox-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   )
   profileDir = path.join(workDir, 'profile')
-  outDir = path.join(workDir, 'out')
+  dataDir = path.join(workDir, 'data')
+  outDir = path.join(dataDir, BUCKET)
   mkdirSync(profileDir, { recursive: true })
-  mkdirSync(outDir, { recursive: true })
+  mkdirSync(dataDir, { recursive: true })
   placesPath = path.join(profileDir, 'places.sqlite')
   blocklistPath = path.join(workDir, 'blocklist.txt')
   writeFileSync(blocklistPath, '')
@@ -291,7 +296,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const files = readdirSync(outDir).sort()
     expect(files).toHaveLength(3)
@@ -322,7 +327,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    await src.pull({ outDir, since: SINCE })
+    await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     const lines = csv.trim().split('\n')
@@ -357,7 +362,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     const lines = csv.trim().split('\n')
@@ -388,7 +393,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).toContain('https://recent.example/')
@@ -412,7 +417,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
     expect(metrics.rows).toBe(1)
   })
 
@@ -432,7 +437,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).toContain('https://q.example/path')
@@ -457,7 +462,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).toContain('https://f.example/page')
@@ -477,7 +482,7 @@ describe('ingestLocalFirefox', () => {
     db.close()
 
     const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-    await src.pull({ outDir, since: SINCE })
+    await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).toContain('"a, ""b"" \nc"')
@@ -494,7 +499,7 @@ describe('ingestLocalFirefox', () => {
     // intentionally do not close — simulates Firefox running
     try {
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      const metrics = await src.pull({ outDir, since: SINCE })
+      const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
       expect(metrics.rows).toBe(1)
       const csv = readHistoryCsv()
       expect(csv).toContain('https://locked.example/')
@@ -524,7 +529,7 @@ describe('ingestLocalFirefox', () => {
       profileDir,
       blocklistPath,
     })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).not.toContain('twitter.com')
@@ -554,7 +559,7 @@ describe('ingestLocalFirefox', () => {
       profileDir,
       blocklistPath,
     })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).not.toContain('m.twitter.com')
@@ -592,7 +597,7 @@ describe('ingestLocalFirefox', () => {
       profileDir,
       blocklistPath,
     })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).not.toContain('blocked.example')
@@ -631,7 +636,7 @@ describe('ingestLocalFirefox', () => {
       profileDir,
       blocklistPath,
     })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     expect(metrics.rows).toBe(1)
     expect(metrics.blocklist_filtered).toBe(3)
@@ -661,7 +666,7 @@ describe('ingestLocalFirefox', () => {
       profileDir,
       blocklistPath,
     })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const csv = readHistoryCsv()
     expect(csv).toContain('about:blank')
@@ -691,7 +696,7 @@ describe('ingestLocalFirefox', () => {
       profileDir,
       blocklistPath,
     })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     expect(metrics.rows).toBe(2)
     expect(metrics.blocklist_filtered).toBe(0)
@@ -720,7 +725,7 @@ describe('ingestLocalFirefox', () => {
     )
     try {
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      const metrics = await src.pull({ outDir, since: SINCE })
+      const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
       expect(metrics.rows).toBeGreaterThanOrEqual(1)
       const csv = readHistoryCsv()
       expect(csv).toContain('https://wal-locked.example/')
@@ -735,7 +740,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      const metrics = await src.pull({ outDir, since: SINCE })
+      const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       expect(csv.trim()).toBe('bookmarked_at,url,title,guid')
@@ -756,7 +761,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       const lines = csv.trim().split('\n')
@@ -782,7 +787,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       expect(csv).toContain('https://ios-promoted.example/')
@@ -817,7 +822,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       expect(csv).not.toContain('toolbar.example')
@@ -839,7 +844,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       const lines = csv.trim().split('\n')
@@ -862,7 +867,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       const lines = csv.trim().split('\n')
@@ -885,7 +890,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       const lines = csv.trim().split('\n')
@@ -916,7 +921,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readBookmarksCsv()
       const lines = csv.trim().split('\n')
@@ -955,7 +960,7 @@ describe('ingestLocalFirefox', () => {
         profileDir,
         blocklistPath,
       })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const historyCsv = readHistoryCsv()
       const bookmarksCsv = readBookmarksCsv()
@@ -971,7 +976,7 @@ describe('ingestLocalFirefox', () => {
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
       let caught: unknown
       try {
-        await src.pull({ outDir, since: SINCE })
+        await src.pull({ dataDir, since: SINCE, until: UNTIL })
       } catch (e) {
         caught = e
       }
@@ -991,7 +996,7 @@ describe('ingestLocalFirefox', () => {
       db.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      const metrics = await src.pull({ outDir, since: SINCE })
+      const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv.trim()).toBe('last_used,url,title,device,pinned')
@@ -1005,7 +1010,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv.trim()).toBe('last_used,url,title,device,pinned')
@@ -1033,7 +1038,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       const lines = csv.trim().split('\n')
@@ -1071,7 +1076,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('Hex Desktop')
@@ -1098,7 +1103,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       const lines = csv.trim().split('\n')
@@ -1140,7 +1145,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).not.toContain('ancient.example')
@@ -1181,7 +1186,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).not.toContain('stale.example')
@@ -1222,7 +1227,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('a.example')
@@ -1255,7 +1260,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       const lines = csv.trim().split('\n')
@@ -1287,7 +1292,7 @@ describe('ingestLocalFirefox', () => {
       tabs.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('https://current.example/')
@@ -1304,7 +1309,7 @@ describe('ingestLocalFirefox', () => {
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
       let caught: unknown
       try {
-        await src.pull({ outDir, since: SINCE })
+        await src.pull({ dataDir, since: SINCE, until: UNTIL })
       } catch (e) {
         caught = e
       }
@@ -1345,7 +1350,7 @@ describe('ingestLocalFirefox', () => {
         )
       try {
         const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-        await src.pull({ outDir, since: SINCE })
+        await src.pull({ dataDir, since: SINCE, until: UNTIL })
         const csv = readOpenTabsCsv()
         expect(csv).toContain('locked-sync.example')
       } finally {
@@ -1372,7 +1377,7 @@ describe('ingestLocalFirefox', () => {
       places.close()
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv.trim()).toBe('last_used,url,title,device,pinned')
@@ -1398,7 +1403,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       const lines = csv.trim().split('\n')
@@ -1443,7 +1448,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('https://fresh.example/')
@@ -1471,7 +1476,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('https://only-shutdown.example/')
@@ -1500,7 +1505,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('https://current.example/')
@@ -1536,7 +1541,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('https://win1.example/')
@@ -1569,7 +1574,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       const lines = csv.trim().split('\n')
@@ -1607,7 +1612,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       const lines = csv.trim().split('\n')
@@ -1636,7 +1641,7 @@ describe('ingestLocalFirefox', () => {
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
       let caught: unknown
       try {
-        await src.pull({ outDir, since: SINCE })
+        await src.pull({ dataDir, since: SINCE, until: UNTIL })
       } catch (e) {
         caught = e
       }
@@ -1668,7 +1673,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('https://second.example/')
@@ -1683,7 +1688,7 @@ describe('ingestLocalFirefox', () => {
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
       let caught: unknown
       try {
-        await src.pull({ outDir, since: SINCE })
+        await src.pull({ dataDir, since: SINCE, until: UNTIL })
       } catch (e) {
         caught = e
       }
@@ -1726,7 +1731,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       expect(csv).toContain('https://remote.example/')
@@ -1782,7 +1787,7 @@ describe('ingestLocalFirefox', () => {
       })
 
       const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
-      await src.pull({ outDir, since: SINCE })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
       const csv = readOpenTabsCsv()
       const lines = csv.trim().split('\n').slice(1)

@@ -4,6 +4,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,7 +17,7 @@ import {
 } from '#src/ingest/sources/ssh-claude'
 
 let workDir: string
-let outDir: string
+let dataDir: string
 let fixtureDir: string
 
 beforeEach(() => {
@@ -24,9 +25,9 @@ beforeEach(() => {
     tmpdir(),
     `dream-ssh-cs-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   )
-  outDir = path.join(workDir, 'out')
+  dataDir = path.join(workDir, 'data')
   fixtureDir = path.join(workDir, 'fixture')
-  mkdirSync(outDir, { recursive: true })
+  mkdirSync(dataDir, { recursive: true })
   mkdirSync(fixtureDir, { recursive: true })
 })
 
@@ -34,10 +35,17 @@ afterEach(() => {
   rmSync(workDir, { recursive: true, force: true })
 })
 
-function writeFixture(relPath: string, content: string): void {
+const SINCE = new Date('2026-05-08T00:00:00.000Z')
+const UNTIL = new Date('2026-05-10T00:00:00.000Z')
+const IN_WINDOW = new Date('2026-05-09T12:00:00.000Z')
+const AFTER_WINDOW = new Date('2026-05-11T12:00:00.000Z')
+const BUCKET = '2026-05-09/fake/claude'
+
+function writeFixture(relPath: string, content: string, mtime: Date): void {
   const full = path.join(fixtureDir, relPath)
   mkdirSync(path.dirname(full), { recursive: true })
   writeFileSync(full, content)
+  utimesSync(full, mtime, mtime)
 }
 
 function listFiles(dir: string): string[] {
@@ -53,6 +61,8 @@ function listFiles(dir: string): string[] {
   walk(dir, '')
   return out.sort()
 }
+
+const tarFixture = (): string[] => ['sh', '-c', `tar -czf - -C ${fixtureDir} .`]
 
 describe('ingestSshClaude', () => {
   test('uses host as both ssh target and machine label', () => {
@@ -74,21 +84,33 @@ describe('buildRemoteCmd', () => {
 })
 
 describe('runSshTarPipeline', () => {
-  test('extracts a tar stream from upstream and reports metrics', async () => {
-    writeFixture('-Users-franky-projA/aaa.jsonl', '{"type":"user"}\n')
-    writeFixture('-Users-franky-projB/bbb.jsonl', '{"type":"user"}\n')
+  test('extracts a tar stream and routes files into mtime day-buckets', async () => {
+    writeFixture(
+      '-Users-franky-projA/aaa.jsonl',
+      '{"type":"user"}\n',
+      IN_WINDOW,
+    )
+    writeFixture(
+      '-Users-franky-projB/bbb.jsonl',
+      '{"type":"user"}\n',
+      IN_WINDOW,
+    )
 
     const result = await runSshTarPipeline({
-      upstream: ['sh', '-c', `tar -czf - -C ${fixtureDir} .`],
-      outDir,
+      upstream: tarFixture(),
+      dataDir,
       host: 'fake',
+      since: SINCE,
+      until: UNTIL,
     })
 
-    expect(listFiles(outDir).filter((f) => !f.startsWith('.'))).toEqual([
-      '-Users-franky-projA/aaa.jsonl',
-      '-Users-franky-projA/aaa.md',
-      '-Users-franky-projB/bbb.jsonl',
-      '-Users-franky-projB/bbb.md',
+    expect(
+      listFiles(dataDir).filter((f) => !path.basename(f).startsWith('.')),
+    ).toEqual([
+      `${BUCKET}/-Users-franky-projA/aaa.jsonl`,
+      `${BUCKET}/-Users-franky-projA/aaa.md`,
+      `${BUCKET}/-Users-franky-projB/bbb.jsonl`,
+      `${BUCKET}/-Users-franky-projB/bbb.md`,
     ])
     expect(result).toEqual({
       sessions_pulled: 2,
@@ -96,26 +118,70 @@ describe('runSshTarPipeline', () => {
       bytes: 32,
     })
     expect(
-      readFileSync(path.join(outDir, '-Users-franky-projA/aaa.jsonl'), 'utf-8'),
+      readFileSync(
+        path.join(dataDir, `${BUCKET}/-Users-franky-projA/aaa.jsonl`),
+        'utf-8',
+      ),
     ).toBe('{"type":"user"}\n')
   })
 
-  test('splits sessions vs memories in metrics when extracting a mixed payload', async () => {
-    writeFixture('-Users-franky-projA/aaa.jsonl', '{"type":"user"}\n')
-    writeFixture('-Users-franky-projA/memory/feedback_x.md', 'memo body\n')
-    writeFixture('-Users-franky-projA/memory/MEMORY.md', '- index\n')
+  test('post-filters files whose mtime is at or after until', async () => {
+    writeFixture(
+      '-Users-franky-projA/aaa.jsonl',
+      '{"type":"user"}\n',
+      IN_WINDOW,
+    )
+    writeFixture(
+      '-Users-franky-projA/ccc.jsonl',
+      '{"type":"user"}\n',
+      AFTER_WINDOW,
+    )
 
     const result = await runSshTarPipeline({
-      upstream: ['sh', '-c', `tar -czf - -C ${fixtureDir} .`],
-      outDir,
+      upstream: tarFixture(),
+      dataDir,
       host: 'fake',
+      since: SINCE,
+      until: UNTIL,
     })
 
-    expect(listFiles(outDir).filter((f) => !f.startsWith('.'))).toEqual([
+    expect(
+      listFiles(dataDir).filter((f) => !path.basename(f).startsWith('.')),
+    ).toEqual([
+      `${BUCKET}/-Users-franky-projA/aaa.jsonl`,
+      `${BUCKET}/-Users-franky-projA/aaa.md`,
+    ])
+    expect(result.sessions_pulled).toBe(1)
+  })
+
+  test('splits sessions vs memories in metrics when extracting a mixed payload', async () => {
+    writeFixture(
       '-Users-franky-projA/aaa.jsonl',
-      '-Users-franky-projA/aaa.md',
-      '-Users-franky-projA/memory/MEMORY.md',
+      '{"type":"user"}\n',
+      IN_WINDOW,
+    )
+    writeFixture(
       '-Users-franky-projA/memory/feedback_x.md',
+      'memo body\n',
+      IN_WINDOW,
+    )
+    writeFixture('-Users-franky-projA/memory/MEMORY.md', '- index\n', IN_WINDOW)
+
+    const result = await runSshTarPipeline({
+      upstream: tarFixture(),
+      dataDir,
+      host: 'fake',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(
+      listFiles(dataDir).filter((f) => !path.basename(f).startsWith('.')),
+    ).toEqual([
+      `${BUCKET}/-Users-franky-projA/aaa.jsonl`,
+      `${BUCKET}/-Users-franky-projA/aaa.md`,
+      `${BUCKET}/-Users-franky-projA/memory/MEMORY.md`,
+      `${BUCKET}/-Users-franky-projA/memory/feedback_x.md`,
     ])
     expect(result.sessions_pulled).toBe(1)
     expect(result.memories_pulled).toBe(2)
@@ -124,8 +190,10 @@ describe('runSshTarPipeline', () => {
   test('handles an empty tar (no files matched on remote) as success', async () => {
     const result = await runSshTarPipeline({
       upstream: ['sh', '-c', `tar -czf - -T /dev/null`],
-      outDir,
+      dataDir,
       host: 'fake',
+      since: SINCE,
+      until: UNTIL,
     })
     expect(result).toEqual({
       sessions_pulled: 0,
@@ -137,8 +205,10 @@ describe('runSshTarPipeline', () => {
   test('throws SshSourceFailure when upstream exits non-zero', async () => {
     const result = await runSshTarPipeline({
       upstream: ['sh', '-c', 'echo "ssh: Could not resolve" >&2; exit 255'],
-      outDir,
+      dataDir,
       host: 'invalid.example',
+      since: SINCE,
+      until: UNTIL,
     }).catch((e: unknown) => e)
 
     expect(result).toBeInstanceOf(Error)
@@ -151,14 +221,15 @@ describe('runSshTarPipeline', () => {
   test('throws SshSourceFailure when upstream emits invalid gzip (tar fails)', async () => {
     const result = await runSshTarPipeline({
       upstream: ['sh', '-c', 'printf "not a tar archive"'],
-      outDir,
+      dataDir,
       host: 'fake',
+      since: SINCE,
+      until: UNTIL,
     }).catch((e: unknown) => e)
 
     expect(result).toBeInstanceOf(Error)
     if (!(result instanceof Error)) throw new Error('unreachable')
     expect(result.message).toContain('host=fake')
-    // tar exit code is non-zero; the exact code varies by tar implementation
     expect(result.message).not.toContain('tar=0')
   })
 
@@ -169,8 +240,10 @@ describe('runSshTarPipeline', () => {
         '-c',
         'echo "upstream sad" >&2; printf "garbage" ; exit 7',
       ],
-      outDir,
+      dataDir,
       host: 'fake',
+      since: SINCE,
+      until: UNTIL,
     }).catch((e: unknown) => e)
 
     expect(result).toBeInstanceOf(Error)

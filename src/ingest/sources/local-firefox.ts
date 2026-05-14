@@ -7,6 +7,7 @@ import {
   rmSync,
   statSync,
 } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -15,6 +16,7 @@ import * as lz4js from 'lz4js'
 import { z } from 'zod'
 
 import type { Source } from '#src/ingest/orchestrator'
+import { utcDay } from '#src/ingest/utc-day'
 
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000
 
@@ -523,9 +525,20 @@ export function ingestLocalFirefox(opts: {
   return {
     machine: opts.machine,
     source: 'firefox',
-    pull: async ({ outDir, since }) => {
+    pull: async ({ dataDir, since, until }) => {
       const blocklist = loadBlocklist(opts.blocklistPath)
       const now = new Date()
+      // Per-day grouping of history rows and the strict `until` upper bound
+      // (a `last_visit_date < until` query clause) are deferred to dream-iba4;
+      // for now the whole pull lands in the day-bucket of the window's last
+      // instant.
+      const outDir = path.join(
+        dataDir,
+        utcDay(new Date(until.getTime() - 1)),
+        opts.machine,
+        'firefox',
+      )
+      await mkdir(outDir, { recursive: true })
       const { places: placesRaw, bookmarks: bookmarksRaw } =
         readPlacesFromProfile(opts.profileDir, since)
       const syncedTabs = readSyncedTabsFromProfile(opts.profileDir)

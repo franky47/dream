@@ -3,27 +3,15 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import * as errore from 'errore'
-
 import { parseConfig } from '#src/config'
-import { buildRunLog } from '#src/ingest/log'
-import { run, type Source } from '#src/ingest/orchestrator'
+import { buildRunLog, runLogFileName } from '#src/ingest/log'
+import { IngestFatal, run, type Source } from '#src/ingest/orchestrator'
 import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
 import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 import { ingestLocalOpencode } from '#src/ingest/sources/local-opencode'
 import { ingestSshClaude } from '#src/ingest/sources/ssh-claude'
 import { ingestSshOpencode } from '#src/ingest/sources/ssh-opencode'
-
-const INGEST_WINDOW_HOURS = 48
-
-class IngestFatal extends errore.createTaggedError({
-  name: 'IngestFatal',
-  message: 'Ingest cannot continue: $reason',
-}) {}
-
-function utcDateStamp(d: Date): string {
-  return d.toISOString().slice(0, 10)
-}
+import { resolveWindow } from '#src/ingest/window'
 
 async function main(): Promise<number> {
   const cfg = parseConfig(process.env)
@@ -32,7 +20,13 @@ async function main(): Promise<number> {
     return 1
   }
 
-  const since = new Date(Date.now() - INGEST_WINDOW_HOURS * 60 * 60 * 1000)
+  const windowResult = resolveWindow(process.argv.slice(2), new Date())
+  if (windowResult instanceof Error) {
+    console.error(windowResult.message)
+    return 1
+  }
+  const { since, until } = windowResult
+
   const sources: Source[] = [
     ingestLocalClaude({
       machine: cfg.machine,
@@ -59,7 +53,11 @@ async function main(): Promise<number> {
     ),
   ]
 
-  const outcome = await run({ sources, dataDir: cfg.dataDir, since })
+  const outcome = await run({ sources, dataDir: cfg.dataDir, since, until })
+  if (outcome instanceof Error) {
+    console.error(outcome.message)
+    return 1
+  }
 
   const metaDir = path.join(cfg.dataDir, '_meta')
   const prep = await mkdir(metaDir, { recursive: true }).catch(
@@ -70,13 +68,12 @@ async function main(): Promise<number> {
     return 1
   }
 
-  const logPath = path.join(
-    metaDir,
-    `${utcDateStamp(outcome.runStartedAt)}.json`,
-  )
+  const logPath = path.join(metaDir, runLogFileName(outcome.runStartedAt))
   const payload = buildRunLog({
     runStartedAt: outcome.runStartedAt,
     runFinishedAt: outcome.runFinishedAt,
+    since,
+    until,
     results: outcome.results,
   })
   const written = await writeFile(

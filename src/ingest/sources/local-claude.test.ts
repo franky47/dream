@@ -15,7 +15,7 @@ import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
 
 let workDir: string
 let sourceDir: string
-let outDir: string
+let dataDir: string
 
 beforeEach(() => {
   workDir = path.join(
@@ -23,9 +23,9 @@ beforeEach(() => {
     `dream-m4x-cs-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   )
   sourceDir = path.join(workDir, 'projects')
-  outDir = path.join(workDir, 'out')
+  dataDir = path.join(workDir, 'data')
   mkdirSync(sourceDir, { recursive: true })
-  mkdirSync(outDir, { recursive: true })
+  mkdirSync(dataDir, { recursive: true })
 })
 
 afterEach(() => {
@@ -62,7 +62,12 @@ function listFiles(dir: string): string[] {
 
 const IN_WINDOW = new Date('2026-05-09T12:00:00.000Z')
 const OUT_OF_WINDOW = new Date('2026-05-01T12:00:00.000Z')
+const AFTER_WINDOW = new Date('2026-05-11T12:00:00.000Z')
 const SINCE = new Date('2026-05-08T00:00:00.000Z')
+const UNTIL = new Date('2026-05-10T00:00:00.000Z')
+
+// In-window claude files route to data/<utcDay(mtime)>/<machine>/claude/<rel>.
+const BUCKET = '2026-05-09/m4x/claude'
 
 describe('ingestLocalClaude', () => {
   test('exposes machine + source labels from input', () => {
@@ -76,7 +81,7 @@ describe('ingestLocalClaude', () => {
     expect(src.machine).toBe('echo')
   })
 
-  test('copies only in-window jsonl files, preserving relative paths', async () => {
+  test('copies only in-window jsonl files into the mtime day-bucket', async () => {
     writeJsonl(
       '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
       '{"type":"user"}\n',
@@ -89,17 +94,62 @@ describe('ingestLocalClaude', () => {
     )
 
     const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
-    expect(listFiles(outDir)).toEqual([
-      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
-      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md',
+    expect(listFiles(dataDir)).toEqual([
+      `${BUCKET}/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl`,
+      `${BUCKET}/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md`,
     ])
     expect(metrics).toEqual({
       sessions_pulled: 1,
       memories_pulled: 0,
       bytes: 16,
     })
+  })
+
+  test('excludes files modified at or after until', async () => {
+    writeJsonl(
+      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
+      '{"type":"user"}\n',
+      IN_WINDOW,
+    )
+    writeJsonl(
+      '-Users-franky-projA/cccccccc-cccc-cccc-cccc-cccccccccccc.jsonl',
+      '{"type":"user"}\n',
+      AFTER_WINDOW,
+    )
+
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
+
+    expect(listFiles(dataDir)).toEqual([
+      `${BUCKET}/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl`,
+      `${BUCKET}/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md`,
+    ])
+    expect(metrics.sessions_pulled).toBe(1)
+  })
+
+  test('routes files to the day-bucket of their own mtime', async () => {
+    writeJsonl(
+      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
+      '{"type":"user"}\n',
+      new Date('2026-05-08T09:00:00.000Z'),
+    )
+    writeJsonl(
+      '-Users-franky-projA/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl',
+      '{"type":"user"}\n',
+      new Date('2026-05-09T22:00:00.000Z'),
+    )
+
+    const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
+    await src.pull({ dataDir, since: SINCE, until: UNTIL })
+
+    expect(listFiles(dataDir)).toEqual([
+      '2026-05-08/m4x/claude/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
+      '2026-05-08/m4x/claude/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md',
+      '2026-05-09/m4x/claude/-Users-franky-projA/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.jsonl',
+      '2026-05-09/m4x/claude/-Users-franky-projA/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb.md',
+    ])
   })
 
   test('excludes paths under **/subagents/**', async () => {
@@ -115,11 +165,11 @@ describe('ingestLocalClaude', () => {
     )
 
     const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
-    expect(listFiles(outDir)).toEqual([
-      '-Users-franky-projA/dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl',
-      '-Users-franky-projA/dddddddd-dddd-dddd-dddd-dddddddddddd.md',
+    expect(listFiles(dataDir)).toEqual([
+      `${BUCKET}/-Users-franky-projA/dddddddd-dddd-dddd-dddd-dddddddddddd.jsonl`,
+      `${BUCKET}/-Users-franky-projA/dddddddd-dddd-dddd-dddd-dddddddddddd.md`,
     ])
     expect(metrics.sessions_pulled).toBe(1)
   })
@@ -147,13 +197,13 @@ describe('ingestLocalClaude', () => {
     )
 
     const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
-    expect(listFiles(outDir)).toEqual([
-      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl',
-      '-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md',
-      '-Users-franky-projA/memory/MEMORY.md',
-      '-Users-franky-projA/memory/feedback_foo.md',
+    expect(listFiles(dataDir)).toEqual([
+      `${BUCKET}/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.jsonl`,
+      `${BUCKET}/-Users-franky-projA/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa.md`,
+      `${BUCKET}/-Users-franky-projA/memory/MEMORY.md`,
+      `${BUCKET}/-Users-franky-projA/memory/feedback_foo.md`,
     ])
     expect(metrics.sessions_pulled).toBe(1)
     expect(metrics.memories_pulled).toBe(2)
@@ -172,10 +222,10 @@ describe('ingestLocalClaude', () => {
     )
 
     const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
-    expect(listFiles(outDir)).toEqual([
-      '-Users-franky-projA/memory/feedback_foo.md',
+    expect(listFiles(dataDir)).toEqual([
+      `${BUCKET}/-Users-franky-projA/memory/feedback_foo.md`,
     ])
     expect(metrics.memories_pulled).toBe(1)
   })
@@ -194,12 +244,12 @@ describe('ingestLocalClaude', () => {
     )
 
     const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
-    await src.pull({ outDir, since: SINCE })
+    await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const md = readFileSync(
       path.join(
-        outDir,
-        '-Users-franky-projA/ffffffff-ffff-ffff-ffff-ffffffffffff.md',
+        dataDir,
+        `${BUCKET}/-Users-franky-projA/ffffffff-ffff-ffff-ffff-ffffffffffff.md`,
       ),
       'utf-8',
     )
@@ -218,24 +268,14 @@ describe('ingestLocalClaude', () => {
       IN_WINDOW,
     )
     const src = ingestLocalClaude({ machine: 'm4x', sourceDir })
-    const metrics = await src.pull({ outDir, since: SINCE })
+    const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     expect(metrics.bytes).toBe(Buffer.byteLength(content))
-    const copied = readFileSync(
-      path.join(
-        outDir,
-        '-Users-franky-projA/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee.jsonl',
-      ),
-      'utf-8',
+    const copiedPath = path.join(
+      dataDir,
+      `${BUCKET}/-Users-franky-projA/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee.jsonl`,
     )
-    expect(copied).toBe(content)
-    expect(
-      statSync(
-        path.join(
-          outDir,
-          '-Users-franky-projA/eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee.jsonl',
-        ),
-      ).size,
-    ).toBe(Buffer.byteLength(content))
+    expect(readFileSync(copiedPath, 'utf-8')).toBe(content)
+    expect(statSync(copiedPath).size).toBe(Buffer.byteLength(content))
   })
 })

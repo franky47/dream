@@ -26,6 +26,8 @@ const errorEntrySchema = z.object({
 const runLogSchema = z.object({
   run_started_at: z.iso.datetime(),
   run_finished_at: z.iso.datetime(),
+  since: z.iso.datetime(),
+  until: z.iso.datetime(),
   sources: z.array(z.union([okEntrySchema, errorEntrySchema])),
 })
 
@@ -34,6 +36,8 @@ export type RunLog = z.infer<typeof runLogSchema>
 export function buildRunLog(opts: {
   runStartedAt: Date
   runFinishedAt: Date
+  since: Date
+  until: Date
   results: ReadonlyArray<SourceResult>
 }): RunLog {
   const sources = opts.results.map((r) =>
@@ -56,6 +60,15 @@ export function buildRunLog(opts: {
   return runLogSchema.parse({
     run_started_at: opts.runStartedAt.toISOString(),
     run_finished_at: opts.runFinishedAt.toISOString(),
+    since: opts.since.toISOString(),
+    until: opts.until.toISOString(),
     sources,
   })
+}
+
+// Names a run log by its run-start timestamp so same-day runs never clobber.
+// Colons from the ISO form are illegal in filenames on some filesystems, so
+// they are swapped for hyphens.
+export function runLogFileName(runStartedAt: Date): string {
+  return `${runStartedAt.toISOString().replaceAll(':', '-')}.json`
 }

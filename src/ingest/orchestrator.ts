@@ -1,14 +1,16 @@
-import { mkdir, rm } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import path from 'node:path'
 
 import * as errore from 'errore'
+
+import { daysInRange } from '#src/ingest/utc-day'
 
 type Metrics = Record<string, number | string>
 
 export type Source = {
   machine: string
   source: string
-  pull(opts: { outDir: string; since: Date }): Promise<Metrics>
+  pull(opts: { dataDir: string; since: Date; until: Date }): Promise<Metrics>
 }
 
 export type SourceResult =
@@ -32,6 +34,11 @@ class SourceFailure extends errore.createTaggedError({
   message: 'Source $machine/$source failed: $reason',
 }) {}
 
+export class IngestFatal extends errore.createTaggedError({
+  name: 'IngestFatal',
+  message: 'Ingest cannot continue: $reason',
+}) {}
+
 export type RunOutcome = {
   runStartedAt: Date
   runFinishedAt: Date
@@ -50,52 +57,15 @@ async function runOne({
   source,
   dataDir,
   since,
+  until,
 }: {
   source: Source
   dataDir: string
   since: Date
+  until: Date
 }): Promise<SourceResult> {
-  const outDir = path.join(dataDir, source.machine, source.source)
   const start = performance.now()
-  const removed = await rm(outDir, { recursive: true, force: true }).catch(
-    (e) =>
-      new SourceFailure({
-        machine: source.machine,
-        source: source.source,
-        reason: 'failed to remove outDir',
-        cause: e,
-      }),
-  )
-  if (removed instanceof Error) {
-    return {
-      machine: source.machine,
-      source: source.source,
-      status: 'error',
-      durationMs: Math.round(performance.now() - start),
-      error: describeError(removed),
-    }
-  }
-
-  const made = await mkdir(outDir, { recursive: true }).catch(
-    (e) =>
-      new SourceFailure({
-        machine: source.machine,
-        source: source.source,
-        reason: 'failed to create outDir',
-        cause: e,
-      }),
-  )
-  if (made instanceof Error) {
-    return {
-      machine: source.machine,
-      source: source.source,
-      status: 'error',
-      durationMs: Math.round(performance.now() - start),
-      error: describeError(made),
-    }
-  }
-
-  const metrics = await source.pull({ outDir, since }).catch(
+  const metrics = await source.pull({ dataDir, since, until }).catch(
     (e) =>
       new SourceFailure({
         machine: source.machine,
@@ -123,17 +93,45 @@ async function runOne({
   }
 }
 
+async function clearDayBucket(dayDir: string): Promise<IngestFatal | void> {
+  const removed = await rm(dayDir, { recursive: true, force: true }).catch(
+    (e) =>
+      new IngestFatal({
+        reason: `failed to clear day-bucket ${dayDir}`,
+        cause: e,
+      }),
+  )
+  if (removed instanceof Error) return removed
+}
+
 export async function run(opts: {
   sources: ReadonlyArray<Source>
   dataDir: string
   since: Date
-}): Promise<RunOutcome> {
+  until: Date
+  clearDay?: (dayDir: string) => Promise<IngestFatal | void>
+}): Promise<IngestFatal | RunOutcome> {
   const runStartedAt = new Date()
-  const settled = await Promise.all(
+  const clear = opts.clearDay ?? clearDayBucket
+
+  const cleared = await Promise.all(
+    daysInRange(opts.since, opts.until).map((day) =>
+      clear(path.join(opts.dataDir, day)),
+    ),
+  )
+  const clearFailure = cleared.find((c) => c instanceof Error)
+  if (clearFailure) return clearFailure
+
+  const results = await Promise.all(
     opts.sources.map((source) =>
-      runOne({ source, dataDir: opts.dataDir, since: opts.since }),
+      runOne({
+        source,
+        dataDir: opts.dataDir,
+        since: opts.since,
+        until: opts.until,
+      }),
     ),
   )
   const runFinishedAt = new Date()
-  return { runStartedAt, runFinishedAt, results: settled }
+  return { runStartedAt, runFinishedAt, results }
 }

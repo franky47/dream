@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import { run, type Source } from '#src/ingest/orchestrator'
+import { IngestFatal, run, type Source } from '#src/ingest/orchestrator'
 
 let dataDir: string
 
@@ -20,25 +20,82 @@ afterEach(() => {
 })
 
 const SINCE = new Date('2026-05-08T00:00:00.000Z')
+const UNTIL = new Date('2026-05-10T00:00:00.000Z')
+
+function seedFile(rel: string, contents: string): string {
+  const full = path.join(dataDir, rel)
+  mkdirSync(path.dirname(full), { recursive: true })
+  writeFileSync(full, contents)
+  return full
+}
 
 describe('orchestrator.run', () => {
-  test('wipes outDir before invoking pull', async () => {
-    const outDir = path.join(dataDir, 'm4x', 'fake')
-    mkdirSync(outDir, { recursive: true })
-    writeFileSync(path.join(outDir, 'stale.txt'), 'leftover')
+  test('clears the day-buckets inside the window before pulling', async () => {
+    seedFile('2026-05-08/m4x/claude/stale.txt', 'old')
+    seedFile('2026-05-09/m4x/claude/stale.txt', 'old')
 
-    let observedExists = true
+    let observed: string[] = []
     const source: Source = {
       machine: 'm4x',
       source: 'fake',
-      pull: async ({ outDir }) => {
-        observedExists = existsSync(path.join(outDir, 'stale.txt'))
-        return { files_pulled: 0, bytes: 0 }
+      pull: async ({ dataDir: dir }) => {
+        observed = [
+          existsSync(path.join(dir, '2026-05-08/m4x/claude/stale.txt')),
+          existsSync(path.join(dir, '2026-05-09/m4x/claude/stale.txt')),
+        ].map(String)
+        return {}
       },
     }
 
-    await run({ sources: [source], dataDir, since: SINCE })
-    expect(observedExists).toBe(false)
+    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    expect(observed).toEqual(['false', 'false'])
+  })
+
+  test('leaves day-buckets outside the window untouched', async () => {
+    const keep = seedFile('2026-05-01/m4x/claude/keep.txt', 'keep')
+    const meta = seedFile('_meta/2026-05-09.json', '{}')
+
+    const source: Source = {
+      machine: 'm4x',
+      source: 'fake',
+      pull: async () => ({}),
+    }
+    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+
+    expect(existsSync(keep)).toBe(true)
+    expect(existsSync(meta)).toBe(true)
+  })
+
+  test('passes dataDir, since and until through to each source', async () => {
+    const received: Array<{ dataDir: string; since: Date; until: Date }> = []
+    const source: Source = {
+      machine: 'm4x',
+      source: 'fake',
+      pull: async (opts) => {
+        received.push(opts)
+        return {}
+      },
+    }
+
+    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    expect(received).toEqual([{ dataDir, since: SINCE, until: UNTIL }])
+  })
+
+  test('aborts fatally when a day-bucket clear fails', async () => {
+    const source: Source = {
+      machine: 'm4x',
+      source: 'fake',
+      pull: async () => ({}),
+    }
+    const outcome = await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      clearDay: async (day) =>
+        new IngestFatal({ reason: `cannot clear ${day}` }),
+    })
+    expect(IngestFatal.is(outcome)).toBe(true)
   })
 
   test('one source throwing does not abort the others', async () => {
@@ -59,13 +116,15 @@ describe('orchestrator.run', () => {
       sources: [flaky, happy],
       dataDir,
       since: SINCE,
+      until: UNTIL,
     })
+    if (outcome instanceof Error) throw new Error('unexpected fatal')
 
     expect(outcome.results).toHaveLength(2)
-    const flakyResult = outcome.results.find((r) => r.source === 'flaky')
-    const happyResult = outcome.results.find((r) => r.source === 'happy')
-    expect(flakyResult?.status).toBe('error')
-    expect(happyResult?.status).toBe('ok')
+    expect(outcome.results.find((r) => r.source === 'flaky')?.status).toBe(
+      'error',
+    )
+    expect(outcome.results.find((r) => r.source === 'happy')?.status).toBe('ok')
   })
 
   test('records duration_ms for both ok and error outcomes', async () => {
@@ -90,7 +149,9 @@ describe('orchestrator.run', () => {
       sources: [slow, slowFail],
       dataDir,
       since: SINCE,
+      until: UNTIL,
     })
+    if (outcome instanceof Error) throw new Error('unexpected fatal')
     for (const r of outcome.results) {
       expect(r.durationMs).toBeGreaterThanOrEqual(15)
     }
@@ -112,6 +173,7 @@ describe('orchestrator.run', () => {
       sources: [make('a'), make('b')],
       dataDir,
       since: SINCE,
+      until: UNTIL,
     })
     const elapsed = performance.now() - start
     expect(elapsed).toBeLessThan(SLEEP_MS * 1.8)

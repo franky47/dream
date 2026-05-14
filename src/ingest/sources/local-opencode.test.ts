@@ -12,7 +12,12 @@ const rowSchema = z.record(z.string(), z.unknown())
 
 let workDir: string
 let dbPath: string
+let dataDir: string
 let outDir: string
+
+const UNTIL = new Date('2026-05-10T00:00:00.000Z')
+// opencode routes into data/<utcDay(until - 1ms)>/<machine>/opencode.
+const BUCKET = '2026-05-09/m4x/opencode'
 
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE project (
@@ -113,9 +118,10 @@ beforeEach(() => {
     `dream-local-opencode-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   )
   dbPath = path.join(workDir, 'opencode.db')
-  outDir = path.join(workDir, 'out')
+  dataDir = path.join(workDir, 'data')
+  outDir = path.join(dataDir, BUCKET)
   mkdirSync(workDir, { recursive: true })
-  mkdirSync(outDir, { recursive: true })
+  mkdirSync(dataDir, { recursive: true })
 })
 
 afterEach(() => {
@@ -132,7 +138,11 @@ describe('ingestLocalOpencode', () => {
   test('writes a per-session jsonl with header + message, subagents excluded', async () => {
     seedDb()
     const src = ingestLocalOpencode({ machine: 'm4x', dbPath })
-    const metrics = await src.pull({ outDir, since: new Date(0) })
+    const metrics = await src.pull({
+      dataDir,
+      since: new Date(0),
+      until: UNTIL,
+    })
 
     expect(readdirSync(outDir).sort()).toEqual(['ses_1.jsonl'])
     const content = readFileSync(path.join(outDir, 'ses_1.jsonl'), 'utf-8')

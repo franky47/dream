@@ -1,3 +1,6 @@
+import { mkdir } from 'node:fs/promises'
+import path from 'node:path'
+
 import * as errore from 'errore'
 
 import {
@@ -5,6 +8,7 @@ import {
   splitJsonlToSessionFiles,
 } from '#lib/opencode/pull'
 import type { Source } from '#src/ingest/orchestrator'
+import { utcDay } from '#src/ingest/utc-day'
 
 const SOURCE = 'opencode'
 const DEFAULT_REMOTE_DB_PATH = '~/.local/share/opencode/opencode.db'
@@ -116,8 +120,18 @@ export function ingestSshOpencode(opts: { host: string }): Source {
   return {
     machine: opts.host,
     source: SOURCE,
-    pull: async ({ outDir, since }) =>
-      runSshOpencodePipeline({
+    pull: async ({ dataDir, since, until }) => {
+      // Per-session day routing and the strict `until` upper bound (a SQL
+      // `time_updated < until` clause) are deferred to dream-7ear; for now
+      // the whole pull lands in the day-bucket of the window's last instant.
+      const outDir = path.join(
+        dataDir,
+        utcDay(new Date(until.getTime() - 1)),
+        opts.host,
+        SOURCE,
+      )
+      await mkdir(outDir, { recursive: true })
+      return runSshOpencodePipeline({
         upstream: [
           'ssh',
           '-o',
@@ -127,6 +141,7 @@ export function ingestSshOpencode(opts: { host: string }): Source {
         ],
         outDir,
         host: opts.host,
-      }),
+      })
+    },
   }
 }

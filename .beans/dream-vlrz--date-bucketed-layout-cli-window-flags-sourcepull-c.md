@@ -1,11 +1,11 @@
 ---
 # dream-vlrz
 title: Date-bucketed layout, CLI window flags, Source.pull contract change
-status: todo
+status: completed
 type: feature
 priority: normal
 created_at: 2026-05-14T09:32:12Z
-updated_at: 2026-05-14T09:32:12Z
+updated_at: 2026-05-14T12:00:00Z
 parent: dream-uvok
 blocked_by:
     - dream-0ju1
@@ -25,14 +25,14 @@ The tracer spine: the atomic `Source.pull` contract change plus everything neede
 
 ## Acceptance criteria
 
-- [ ] `bun ingest` with no flags behaves exactly as before (last 48h up to now), but writes to `data/<day>/<machine>/<source>/…`.
-- [ ] `bun ingest --since <date>` and `--since <date> --until <date>` ingest the correct window; invalid flag combinations exit non-zero with a clear message.
-- [ ] A run clears and refills only the day-buckets within `[since, until)`; day-buckets outside the window are untouched.
-- [ ] All five sources compile and run against the new `{ dataDir, since, until }` contract; no source writes outside the cleared day range.
-- [ ] claude local/ssh route each session/memory file to its mtime's UTC day; out-of-window files are excluded.
-- [ ] A failure in the clear pre-pass aborts the whole run with a non-zero exit code.
-- [ ] Run log is named by run-start timestamp and its payload records `since`/`until`.
-- [ ] Existing orchestrator and claude source tests are extended with windowed cases; `bun check` passes.
+- [x] `bun ingest` with no flags behaves exactly as before (last 48h up to now), but writes to `data/<day>/<machine>/<source>/…`.
+- [x] `bun ingest --since <date>` and `--since <date> --until <date>` ingest the correct window; invalid flag combinations exit non-zero with a clear message.
+- [x] A run clears and refills only the day-buckets within `[since, until)`; day-buckets outside the window are untouched.
+- [x] All five sources compile and run against the new `{ dataDir, since, until }` contract; no source writes outside the cleared day range.
+- [x] claude local/ssh route each session/memory file to its mtime's UTC day; out-of-window files are excluded.
+- [x] A failure in the clear pre-pass aborts the whole run with a non-zero exit code.
+- [x] Run log is named by run-start timestamp and its payload records `since`/`until`.
+- [x] Existing orchestrator and claude source tests are extended with windowed cases; `bun check` passes.
 
 ## User stories addressed
 
@@ -47,3 +47,18 @@ The tracer spine: the atomic `Source.pull` contract change plus everything neede
 - User story 16
 - User story 17
 - User story 20
+
+## Summary of Changes
+
+- **`orchestrator.ts`** — `Source.pull` contract is now `{ dataDir, since, until }`. The destructive clear moved out of `runOne` into a `run()` pre-pass: `daysInRange(since, until)` → `rm -rf data/<day>` in parallel. A clear failure returns an exported `IngestFatal` (run-fatal), so `run()` now returns `IngestFatal | RunOutcome`. The per-day clear is exposed as an injectable `clearDay` seam for testing the fatal path.
+- **`local-claude.ts` / `ssh-claude.ts`** — route each file to `data/<utcDay(mtime)>/<machine>/claude/<rel>`. `ssh-claude` extracts the tar into a `mkdtemp` staging dir, post-filters by mtime, routes, and cleans the staging dir in a `finally`.
+- **`local-opencode.ts` / `ssh-opencode.ts` / `local-firefox.ts`** — migrated to the new signature; each routes its whole pull into a single day-bucket `utcDay(until − 1ms)`. Per-session/per-day routing and the SQL-level `until` upper bound are deferred to dream-7ear / dream-iba4 (noted in code comments).
+- **`log.ts`** — `buildRunLog` payload gains `since`/`until`; new pure `runLogFileName(runStartedAt)` helper names logs by ISO timestamp with colons swapped for hyphens (filesystem-safe).
+- **`main.ts`** — wires `resolveWindow(process.argv)` for `--since`/`--until` (non-zero exit on invalid windows), handles `run()`'s `IngestFatal` return, names the run log via `runLogFileName`.
+
+### Decisions / deviations
+
+- **Interval semantics**: claude sources filter `since < mtime < until` (exclusive both ends). The PRD's Interval-Decisions prose says `since <= ts`, but its Further-Notes and the `find -newermt` lower bound (which `ssh-claude` relies on) are exclusive. Exclusive-lower was chosen for cross-source consistency, since `find` cannot express `>=`.
+- **opencode/firefox single-bucket**: these sources don't yet apply the `until` upper bound as a data filter — `until` only picks the bucket. This is the explicitly-deferred work (dream-7ear / dream-iba4); a backfill run currently over-collects rows newer than the window into the last bucket. Acceptable per the PRD's deferral boundary.
+- **Firefox snapshot skip** (`includeSnapshots: !untilWasExplicit`) is deferred to dream-iba4 and intentionally not wired in `main.ts` here.
+- `main.ts` has no unit test (composition root, no existing harness); its behaviour is covered by the orchestrator/source/log tests plus a manual end-to-end smoke run.

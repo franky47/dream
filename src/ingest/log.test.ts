@@ -1,28 +1,48 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildRunLog } from '#src/ingest/log'
+import { buildRunLog, runLogFileName } from '#src/ingest/log'
 
 const RUN_START = new Date('2026-05-10T00:00:00.000Z')
 const RUN_END = new Date('2026-05-10T00:01:23.000Z')
+const SINCE = new Date('2026-05-08T00:00:00.000Z')
+const UNTIL = new Date('2026-05-10T00:00:00.000Z')
 
 describe('buildRunLog', () => {
   test('produces a payload with no sources when given empty results', () => {
     const payload = buildRunLog({
       runStartedAt: RUN_START,
       runFinishedAt: RUN_END,
+      since: SINCE,
+      until: UNTIL,
       results: [],
     })
     expect(payload).toEqual({
       run_started_at: '2026-05-10T00:00:00.000Z',
       run_finished_at: '2026-05-10T00:01:23.000Z',
+      since: '2026-05-08T00:00:00.000Z',
+      until: '2026-05-10T00:00:00.000Z',
       sources: [],
     })
+  })
+
+  test('records the resolved since/until window', () => {
+    const payload = buildRunLog({
+      runStartedAt: RUN_START,
+      runFinishedAt: RUN_END,
+      since: SINCE,
+      until: UNTIL,
+      results: [],
+    })
+    expect(payload.since).toBe('2026-05-08T00:00:00.000Z')
+    expect(payload.until).toBe('2026-05-10T00:00:00.000Z')
   })
 
   test('flattens ok metrics into source entries', () => {
     const payload = buildRunLog({
       runStartedAt: RUN_START,
       runFinishedAt: RUN_END,
+      since: SINCE,
+      until: UNTIL,
       results: [
         {
           machine: 'm4x',
@@ -49,6 +69,8 @@ describe('buildRunLog', () => {
     const payload = buildRunLog({
       runStartedAt: RUN_START,
       runFinishedAt: RUN_END,
+      since: SINCE,
+      until: UNTIL,
       results: [
         {
           machine: 'echo',
@@ -80,6 +102,8 @@ describe('buildRunLog', () => {
     const payload = buildRunLog({
       runStartedAt: RUN_START,
       runFinishedAt: RUN_END,
+      since: SINCE,
+      until: UNTIL,
       results: [
         {
           machine: 'm4x',
@@ -110,6 +134,8 @@ describe('buildRunLog', () => {
     const payload = buildRunLog({
       runStartedAt: RUN_START,
       runFinishedAt: RUN_END,
+      since: SINCE,
+      until: UNTIL,
       results: [
         {
           machine: 'm4x',
@@ -143,9 +169,25 @@ describe('buildRunLog', () => {
     const payload = buildRunLog({
       runStartedAt: new Date('2026-01-02T03:04:05.678Z'),
       runFinishedAt: new Date('2026-01-02T03:04:06.000Z'),
+      since: SINCE,
+      until: UNTIL,
       results: [],
     })
     expect(payload.run_started_at).toBe('2026-01-02T03:04:05.678Z')
     expect(payload.run_finished_at).toBe('2026-01-02T03:04:06.000Z')
+  })
+})
+
+describe('runLogFileName', () => {
+  test('names the log by run-start timestamp with no colons', () => {
+    expect(runLogFileName(new Date('2026-05-14T12:34:56.789Z'))).toBe(
+      '2026-05-14T12-34-56.789Z.json',
+    )
+  })
+
+  test('two runs on the same day produce distinct names', () => {
+    const a = runLogFileName(new Date('2026-05-14T08:00:00.000Z'))
+    const b = runLogFileName(new Date('2026-05-14T15:30:00.000Z'))
+    expect(a).not.toBe(b)
   })
 })

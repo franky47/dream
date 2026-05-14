@@ -5,6 +5,7 @@ import { Glob } from 'bun'
 
 import { renderClaudeSession } from '#lib/claude/renderer'
 import type { Source } from '#src/ingest/orchestrator'
+import { utcDay } from '#src/ingest/utc-day'
 
 export function ingestLocalClaude(opts: {
   machine: string
@@ -13,29 +14,35 @@ export function ingestLocalClaude(opts: {
   return {
     machine: opts.machine,
     source: 'claude',
-    pull: async ({ outDir, since }) => {
+    pull: async ({ dataDir, since, until }) => {
       const sinceMs = since.getTime()
+      const untilMs = until.getTime()
       let sessionsPulled = 0
       let memoriesPulled = 0
       let bytes = 0
 
-      const copyIfFresh = async (rel: string): Promise<boolean> => {
+      // Copies an in-window file into its mtime day-bucket; returns the
+      // destination path, or null when the file falls outside [since, until).
+      const copyIfFresh = async (rel: string): Promise<string | null> => {
         const src = path.join(opts.sourceDir, rel)
         const info = await stat(src)
-        if (info.mtimeMs <= sinceMs) return false
-        const dst = path.join(outDir, rel)
+        if (info.mtimeMs <= sinceMs || info.mtimeMs >= untilMs) return null
+        const dst = path.join(
+          dataDir,
+          utcDay(new Date(info.mtimeMs)),
+          opts.machine,
+          'claude',
+          rel,
+        )
         await mkdir(path.dirname(dst), { recursive: true })
-        const written = await Bun.write(dst, Bun.file(src))
-        bytes += written
-        return true
+        bytes += await Bun.write(dst, Bun.file(src))
+        return dst
       }
 
-      const renderSibling = async (rel: string): Promise<void> => {
-        const jsonlPath = path.join(outDir, rel)
-        const jsonlText = await Bun.file(jsonlPath).text()
+      const renderSibling = async (jsonlDst: string): Promise<void> => {
+        const jsonlText = await Bun.file(jsonlDst).text()
         const md = renderClaudeSession(jsonlText)
-        const mdPath = jsonlPath.replace(/\.jsonl$/, '.md')
-        await Bun.write(mdPath, md)
+        await Bun.write(jsonlDst.replace(/\.jsonl$/, '.md'), md)
       }
 
       const sessions = new Glob('**/*.jsonl')
@@ -45,9 +52,10 @@ export function ingestLocalClaude(opts: {
         onlyFiles: true,
       })) {
         if (rel.split(path.sep).includes('subagents')) continue
-        if (await copyIfFresh(rel)) {
+        const dst = await copyIfFresh(rel)
+        if (dst !== null) {
           sessionsPulled += 1
-          await renderSibling(rel)
+          await renderSibling(dst)
         }
       }
 
@@ -57,7 +65,7 @@ export function ingestLocalClaude(opts: {
         absolute: false,
         onlyFiles: true,
       })) {
-        if (await copyIfFresh(rel)) memoriesPulled += 1
+        if ((await copyIfFresh(rel)) !== null) memoriesPulled += 1
       }
 
       return {
