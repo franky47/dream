@@ -1,11 +1,11 @@
 ---
 # dream-0ju1
 title: Window resolution + UTC day utilities
-status: todo
+status: completed
 type: feature
 priority: normal
 created_at: 2026-05-14T09:32:08Z
-updated_at: 2026-05-14T09:32:08Z
+updated_at: 2026-05-14T12:00:00Z
 parent: dream-uvok
 ---
 
@@ -20,13 +20,13 @@ Verifiable on its own through its test suite — nothing else imports it yet.
 
 ## Acceptance criteria
 
-- [ ] `resolveWindow` returns the correct window for: no flags (`[now−48h, now)`), `--since` only (`[since, now)`), and both flags (`[since, until)`).
-- [ ] `resolveWindow` returns a tagged error for `--until` without `--since`, for `since >= until`, and for unparseable/invalid ISO values.
-- [ ] A bare date value is interpreted as UTC midnight; a full ISO datetime is honoured as-is.
-- [ ] `untilWasExplicit` is `true` iff `--until` was passed.
-- [ ] `utcDay` returns the correct UTC `YYYY-MM-DD` regardless of local timezone.
-- [ ] `daysInRange` enumerates `floor(since) … floor(until − 1ms)` inclusive: correct across month/year boundaries, returns a single day for a sub-day window, and an empty array for an empty range.
-- [ ] Both modules have exhaustive co-located tests; `bun check` passes.
+- [x] `resolveWindow` returns the correct window for: no flags (`[now−48h, now)`), `--since` only (`[since, now)`), and both flags (`[since, until)`).
+- [x] `resolveWindow` returns a tagged error for `--until` without `--since`, for `since >= until`, and for unparseable/invalid ISO values.
+- [x] A bare date value is interpreted as UTC midnight; a full ISO datetime is honoured as-is.
+- [x] `untilWasExplicit` is `true` iff `--until` was passed.
+- [x] `utcDay` returns the correct UTC `YYYY-MM-DD` regardless of local timezone.
+- [x] `daysInRange` enumerates `floor(since) … floor(until − 1ms)` inclusive: correct across month/year boundaries, returns a single day for a sub-day window, and an empty array for an empty range.
+- [x] Both modules have exhaustive co-located tests; `bun check` passes.
 
 ## User stories addressed
 
@@ -36,3 +36,12 @@ Verifiable on its own through its test suite — nothing else imports it yet.
 - User story 7
 - User story 18
 - User story 19
+
+## Summary of Changes
+
+- `src/ingest/utc-day.ts` — `utcDay(date)` (UTC `YYYY-MM-DD` via `toISOString`) and `daysInRange(since, until)` enumerating UTC days `floor(since) … floor(until − 1ms)` inclusive by stepping fixed `DAY_MS` from `Date.UTC`-floored bounds; empty range yields `[]`.
+- `src/ingest/window.ts` — `resolveWindow(argv, now)` parsing `--since`/`--until` via `node:util` `parseArgs` (`strict: true`), Zod-validating ISO date-or-datetime values (bare date → UTC midnight), composing defaults (`until ?? now`, `since ?? until − 48h`), and returning an `errore`-tagged `WindowError` for unknown flags, `--until` without `--since`, unparseable values, and `since >= until`.
+- Co-located exhaustive test suites for both modules.
+- `.prettierignore` adds `.beans/` — oxfmt (via `bun check`) was reformatting tool-managed beans markdown; excluding them keeps `bun check` green without fighting the beans CLI.
+
+`strict: true` was chosen for `parseArgs` over `strict: false` because the loose mode widens `values.since` to `string | boolean`, defeating type narrowing; strict mode rejects unknown flags through the same `WindowError` path. The pipeline-wiring task can revisit if it needs to pass through other flags.
