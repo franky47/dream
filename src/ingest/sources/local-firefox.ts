@@ -15,8 +15,8 @@ import * as errore from 'errore'
 import * as lz4js from 'lz4js'
 import { z } from 'zod'
 
+import { utcDay } from '#lib/utc-day'
 import type { Source } from '#src/ingest/orchestrator'
-import { utcDay } from '#src/ingest/utc-day'
 
 const SIXTY_DAYS_MS = 60 * 24 * 60 * 60 * 1000
 

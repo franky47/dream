@@ -1,6 +1,9 @@
 import type { Database } from 'bun:sqlite'
 
-function projectionSqlTemplate(sinceLiteral: string): string {
+function projectionSqlTemplate(
+  sinceLiteral: string,
+  untilLiteral: string,
+): string {
   return `
     SELECT row FROM (
       SELECT
@@ -12,6 +15,7 @@ function projectionSqlTemplate(sinceLiteral: string): string {
           'title', s.title,
           'directory', s.directory,
           'version', s.version,
+          'time_updated', s.time_updated,
           'project', json_object(
             'id', pr.id,
             'worktree', pr.worktree,
@@ -34,6 +38,7 @@ function projectionSqlTemplate(sinceLiteral: string): string {
       LEFT JOIN workspace ws ON ws.id = s.workspace_id
       WHERE s.parent_id IS NULL
         AND s.time_updated > ${sinceLiteral}
+        AND s.time_updated < ${untilLiteral}
 
       UNION ALL
 
@@ -51,7 +56,7 @@ function projectionSqlTemplate(sinceLiteral: string): string {
         1 AS type_rank
       FROM message m
       WHERE m.session_id IN (
-        SELECT id FROM session WHERE parent_id IS NULL AND time_updated > ${sinceLiteral}
+        SELECT id FROM session WHERE parent_id IS NULL AND time_updated > ${sinceLiteral} AND time_updated < ${untilLiteral}
       )
 
       UNION ALL
@@ -74,24 +79,39 @@ function projectionSqlTemplate(sinceLiteral: string): string {
         2 AS type_rank
       FROM part p
       WHERE p.session_id IN (
-        SELECT id FROM session WHERE parent_id IS NULL AND time_updated > ${sinceLiteral}
+        SELECT id FROM session WHERE parent_id IS NULL AND time_updated > ${sinceLiteral} AND time_updated < ${untilLiteral}
       )
     )
     ORDER BY session_id, ts, type_rank
   `
 }
 
-export function buildProjectionSql(opts: { sinceMs: number }): string {
+export function buildProjectionSql(opts: {
+  sinceMs: number
+  untilMs: number
+}): string {
   if (!Number.isInteger(opts.sinceMs) || opts.sinceMs < 0) {
     throw new RangeError(
       `sinceMs must be a non-negative integer, got ${opts.sinceMs}`,
     )
   }
-  return projectionSqlTemplate(String(opts.sinceMs))
+  if (!Number.isInteger(opts.untilMs) || opts.untilMs < 0) {
+    throw new RangeError(
+      `untilMs must be a non-negative integer, got ${opts.untilMs}`,
+    )
+  }
+  return projectionSqlTemplate(String(opts.sinceMs), String(opts.untilMs))
 }
 
-export function projectRows(opts: { db: Database; sinceMs: number }): string[] {
-  const sql = buildProjectionSql({ sinceMs: opts.sinceMs })
+export function projectRows(opts: {
+  db: Database
+  sinceMs: number
+  untilMs: number
+}): string[] {
+  const sql = buildProjectionSql({
+    sinceMs: opts.sinceMs,
+    untilMs: opts.untilMs,
+  })
   return opts.db
     .query<{ row: string }, []>(sql)
     .all()

@@ -93,9 +93,11 @@ function seedDb(): void {
     `INSERT INTO workspace (id, type, name, branch, directory, project_id)
      VALUES ('wks_a', 'local', '', 'main', '/repo', 'prj_a')`,
   ).run()
+  // time_updated 1778328000000 = 2026-05-09T12:00:00Z → routes to the
+  // 2026-05-09 day-bucket (see BUCKET).
   db.prepare(
     `INSERT INTO session (id, project_id, slug, directory, title, version, time_created, time_updated, workspace_id)
-     VALUES ('ses_1', 'prj_a', 'slug', '/repo', 'hi', '0.x', 5000, 9000, 'wks_a')`,
+     VALUES ('ses_1', 'prj_a', 'slug', '/repo', 'hi', '0.x', 5000, 1778328000000, 'wks_a')`,
   ).run()
   db.prepare(
     `INSERT INTO session (id, project_id, parent_id, slug, directory, title, version, time_created, time_updated, workspace_id)

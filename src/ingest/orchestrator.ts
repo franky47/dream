@@ -3,7 +3,7 @@ import path from 'node:path'
 
 import * as errore from 'errore'
 
-import { daysInRange } from '#src/ingest/utc-day'
+import { daysInRange } from '#lib/utc-day'
 
 type Metrics = Record<string, number | string>
 

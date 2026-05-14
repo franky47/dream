@@ -1,7 +1,9 @@
-import { open, type FileHandle } from 'node:fs/promises'
+import { mkdir, open, type FileHandle } from 'node:fs/promises'
 import path from 'node:path'
 
 import { z } from 'zod'
+
+import { utcDay } from '#lib/utc-day'
 
 export type SplitterMetrics = {
   sessions_pulled: number
@@ -15,9 +17,19 @@ const rowEnvelopeSchema = z.object({
   sessionId: z.string(),
 })
 
+// The first row of every session is its header (the projection orders
+// session rows ahead of their messages/parts). It carries `time_updated`,
+// which routes the whole session file to its UTC-day bucket.
+const sessionHeaderSchema = z.object({
+  type: z.literal('session'),
+  sessionId: z.string(),
+  time_updated: z.number(),
+})
+
 export async function splitJsonlToSessionFiles(opts: {
   lines: AsyncIterable<string>
-  outDir: string
+  dataDir: string
+  machine: string
 }): Promise<SplitterMetrics> {
   const metrics: SplitterMetrics = {
     sessions_pulled: 0,
@@ -30,11 +42,19 @@ export async function splitJsonlToSessionFiles(opts: {
 
   for await (const line of opts.lines) {
     if (line.length === 0) continue
-    const env = rowEnvelopeSchema.parse(JSON.parse(line))
+    const parsed: unknown = JSON.parse(line)
+    const env = rowEnvelopeSchema.parse(parsed)
     if (env.sessionId !== currentSessionId) {
       if (handle !== null) await handle.close()
-      const filePath = path.join(opts.outDir, `${env.sessionId}.jsonl`)
-      handle = await open(filePath, 'w')
+      const header = sessionHeaderSchema.parse(parsed)
+      const dir = path.join(
+        opts.dataDir,
+        utcDay(new Date(header.time_updated)),
+        opts.machine,
+        'opencode',
+      )
+      await mkdir(dir, { recursive: true })
+      handle = await open(path.join(dir, `${env.sessionId}.jsonl`), 'w')
       currentSessionId = env.sessionId
     }
     if (handle === null) throw new Error('unreachable: handle is null')

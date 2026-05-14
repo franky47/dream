@@ -4,8 +4,8 @@ import path from 'node:path'
 import { Glob } from 'bun'
 
 import { renderClaudeSession } from '#lib/claude/renderer'
+import { utcDay } from '#lib/utc-day'
 import type { Source } from '#src/ingest/orchestrator'
-import { utcDay } from '#src/ingest/utc-day'
 
 export function ingestLocalClaude(opts: {
   machine: string

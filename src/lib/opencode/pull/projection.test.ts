@@ -13,6 +13,9 @@ function parseRows(rows: ReadonlyArray<string>): Record<string, unknown>[] {
   return rows.map((s) => rowSchema.parse(JSON.parse(s)))
 }
 
+// Far-future upper bound: keeps the existing since-only cases unaffected.
+const UNTIL_MS = 9_999_999_999_999
+
 let workDir: string
 let dbPath: string
 
@@ -183,8 +186,14 @@ afterEach(() => {
 
 describe('buildProjectionSql', () => {
   test('inlines sinceMs as a literal integer at every filter site', () => {
-    const sql = buildProjectionSql({ sinceMs: 1_234_567 })
+    const sql = buildProjectionSql({ sinceMs: 1_234_567, untilMs: UNTIL_MS })
     expect(sql).toContain('time_updated > 1234567')
+    expect(sql).not.toContain('?')
+  })
+
+  test('inlines untilMs as a strict upper bound at every filter site', () => {
+    const sql = buildProjectionSql({ sinceMs: 0, untilMs: 8_888_888 })
+    expect(sql).toContain('time_updated < 8888888')
     expect(sql).not.toContain('?')
   })
 
@@ -204,7 +213,7 @@ describe('buildProjectionSql', () => {
       timeCreated: 5_000,
       timeUpdated: 5_000,
     })
-    const sql = buildProjectionSql({ sinceMs: 0 })
+    const sql = buildProjectionSql({ sinceMs: 0, untilMs: UNTIL_MS })
     const rows = db
       .query<{ row: string }, []>(sql)
       .all()
@@ -233,7 +242,7 @@ describe('projectRows', () => {
       timeUpdated: 5_000,
     })
 
-    const rows = parseRows(projectRows({ db, sinceMs: 0 }))
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
 
     expect(rows).toHaveLength(1)
     expect(rows[0]?.type).toBe('session')
@@ -266,7 +275,7 @@ describe('projectRows', () => {
       data: { role: 'user', mode: 'build' },
     })
 
-    const rows = parseRows(projectRows({ db, sinceMs: 0 }))
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
 
     expect(rows).toHaveLength(2)
     expect(rows[0]?.type).toBe('session')
@@ -308,7 +317,7 @@ describe('projectRows', () => {
       data: { type: 'text', text: 'hello world' },
     })
 
-    const rows = parseRows(projectRows({ db, sinceMs: 0 }))
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
 
     expect(rows).toHaveLength(3)
     expect(rows[0]?.type).toBe('session')
@@ -353,10 +362,63 @@ describe('projectRows', () => {
       data: { role: 'user' },
     })
 
-    const rows = parseRows(projectRows({ db, sinceMs: 0 }))
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
 
     expect(rows).toHaveLength(1)
     expect(rows[0]?.id).toBe('ses_root')
+    db.close()
+  })
+
+  test('excludes sessions updated at or after the until cursor', () => {
+    const db = openFreshDb()
+    insertProject(db, { id: 'prj_a', worktree: '/repo', name: 'dream' })
+    insertWorkspace(db, {
+      id: 'wks_a',
+      projectId: 'prj_a',
+      branch: 'main',
+      directory: '/repo',
+    })
+    insertSession(db, {
+      id: 'ses_in',
+      projectId: 'prj_a',
+      workspaceId: 'wks_a',
+      timeCreated: 1_000,
+      timeUpdated: 4_000,
+    })
+    insertSession(db, {
+      id: 'ses_after',
+      projectId: 'prj_a',
+      workspaceId: 'wks_a',
+      timeCreated: 1_000,
+      timeUpdated: 5_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: 5_000 }))
+
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.id).toBe('ses_in')
+    db.close()
+  })
+
+  test('session header carries time_updated', () => {
+    const db = openFreshDb()
+    insertProject(db, { id: 'prj_a', worktree: '/repo', name: 'dream' })
+    insertWorkspace(db, {
+      id: 'wks_a',
+      projectId: 'prj_a',
+      branch: 'main',
+      directory: '/repo',
+    })
+    insertSession(db, {
+      id: 'ses_1',
+      projectId: 'prj_a',
+      workspaceId: 'wks_a',
+      timeCreated: 5_000,
+      timeUpdated: 7_500,
+    })
+
+    const row = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))[0]
+    expect(row?.time_updated).toBe(7_500)
     db.close()
   })
 
@@ -384,7 +446,9 @@ describe('projectRows', () => {
       timeUpdated: 5_000,
     })
 
-    const rows = parseRows(projectRows({ db, sinceMs: 1_000 }))
+    const rows = parseRows(
+      projectRows({ db, sinceMs: 1_000, untilMs: UNTIL_MS }),
+    )
 
     expect(rows).toHaveLength(1)
     expect(rows[0]?.id).toBe('ses_new')
@@ -414,7 +478,7 @@ describe('projectRows', () => {
       data: { role: 'user' },
     })
 
-    const rows = parseRows(projectRows({ db, sinceMs: 0 }))
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
 
     expect(rows[0]?.type).toBe('session')
     expect(rows[1]?.type).toBe('message')
@@ -437,7 +501,7 @@ describe('projectRows', () => {
       timeUpdated: 5_000,
     })
 
-    const row = parseRows(projectRows({ db, sinceMs: 0 }))[0]
+    const row = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))[0]
     const project = rowSchema.parse(row?.project)
     expect(project.id).toBe('prj_a')
     expect(project.worktree).toBe('/repo')

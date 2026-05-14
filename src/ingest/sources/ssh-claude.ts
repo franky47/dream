@@ -6,8 +6,8 @@ import { Glob } from 'bun'
 import * as errore from 'errore'
 
 import { renderClaudeSession } from '#lib/claude/renderer'
+import { utcDay } from '#lib/utc-day'
 import type { Source } from '#src/ingest/orchestrator'
-import { utcDay } from '#src/ingest/utc-day'
 
 const SOURCE = 'claude'
 

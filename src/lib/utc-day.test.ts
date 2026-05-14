@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { daysInRange, utcDay } from '#src/ingest/utc-day'
+import { daysInRange, utcDay } from '#lib/utc-day'
 
 describe('utcDay', () => {
   test('returns the UTC YYYY-MM-DD for a datetime', () => {

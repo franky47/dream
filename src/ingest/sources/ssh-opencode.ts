@@ -1,6 +1,3 @@
-import { mkdir } from 'node:fs/promises'
-import path from 'node:path'
-
 import * as errore from 'errore'
 
 import {
@@ -8,7 +5,6 @@ import {
   splitJsonlToSessionFiles,
 } from '#lib/opencode/pull'
 import type { Source } from '#src/ingest/orchestrator'
-import { utcDay } from '#src/ingest/utc-day'
 
 const SOURCE = 'opencode'
 const DEFAULT_REMOTE_DB_PATH = '~/.local/share/opencode/opencode.db'
@@ -25,10 +21,14 @@ function shellSingleQuote(s: string): string {
 
 export function buildRemoteCmd(opts: {
   sinceMs: number
+  untilMs: number
   dbPath?: string
 }): string {
   const dbPath = opts.dbPath ?? DEFAULT_REMOTE_DB_PATH
-  const sql = buildProjectionSql({ sinceMs: opts.sinceMs })
+  const sql = buildProjectionSql({
+    sinceMs: opts.sinceMs,
+    untilMs: opts.untilMs,
+  })
   return `sqlite3 -readonly ${shellSingleQuote(dbPath)} ${shellSingleQuote(sql)}`
 }
 
@@ -66,7 +66,7 @@ async function* streamToLines(
 
 export async function runSshOpencodePipeline(opts: {
   upstream: string[]
-  outDir: string
+  dataDir: string
   host: string
 }): Promise<{
   sessions_pulled: number
@@ -93,7 +93,8 @@ export async function runSshOpencodePipeline(opts: {
 
   const splitterPromise = splitJsonlToSessionFiles({
     lines: streamToLines(stdout),
-    outDir: opts.outDir,
+    dataDir: opts.dataDir,
+    machine: opts.host,
   })
 
   const [metrics, sshExit, sshStderr] = await Promise.all([
@@ -120,28 +121,20 @@ export function ingestSshOpencode(opts: { host: string }): Source {
   return {
     machine: opts.host,
     source: SOURCE,
-    pull: async ({ dataDir, since, until }) => {
-      // Per-session day routing and the strict `until` upper bound (a SQL
-      // `time_updated < until` clause) are deferred to dream-7ear; for now
-      // the whole pull lands in the day-bucket of the window's last instant.
-      const outDir = path.join(
-        dataDir,
-        utcDay(new Date(until.getTime() - 1)),
-        opts.host,
-        SOURCE,
-      )
-      await mkdir(outDir, { recursive: true })
-      return runSshOpencodePipeline({
+    pull: async ({ dataDir, since, until }) =>
+      runSshOpencodePipeline({
         upstream: [
           'ssh',
           '-o',
           'BatchMode=yes',
           opts.host,
-          buildRemoteCmd({ sinceMs: since.getTime() }),
+          buildRemoteCmd({
+            sinceMs: since.getTime(),
+            untilMs: until.getTime(),
+          }),
         ],
-        outDir,
+        dataDir,
         host: opts.host,
-      })
-    },
+      }),
   }
 }
