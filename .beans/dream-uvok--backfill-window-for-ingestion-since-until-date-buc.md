@@ -1,11 +1,11 @@
 ---
 # dream-uvok
 title: Backfill window for ingestion (--since/--until, date-bucketed data dir)
-status: todo
+status: completed
 type: epic
 priority: normal
 created_at: 2026-05-14T08:47:07Z
-updated_at: 2026-05-14T08:47:07Z
+updated_at: 2026-05-14T10:46:28Z
 ---
 
 ## Problem Statement
