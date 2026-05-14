@@ -25,7 +25,7 @@ async function main(): Promise<number> {
     console.error(windowResult.message)
     return 1
   }
-  const { since, until } = windowResult
+  const { since, until, untilWasExplicit } = windowResult
 
   const sources: Source[] = [
     ingestLocalClaude({
@@ -49,6 +49,9 @@ async function main(): Promise<number> {
         blocklistPath: fileURLToPath(
           new URL('../../config/firefox-blocklist.txt', import.meta.url),
         ),
+        // A backfill run (explicit --until) only writes past day-buckets, so
+        // the "now" snapshot sub-sources are skipped.
+        includeSnapshots: !untilWasExplicit,
       }),
     ),
   ]

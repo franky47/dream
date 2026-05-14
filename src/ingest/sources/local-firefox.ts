@@ -32,8 +32,11 @@ const placeRowSchema = z.object({
   visit_count: z.number().int().nonnegative(),
   frecency: z.number().int(),
   typed: z.number().int().nonnegative(),
+  // UTC day of the url's most-recent visit — the history row's day-bucket.
+  routing_day: z.string(),
 })
 const placeRowsSchema = z.array(placeRowSchema)
+type PlaceRow = z.infer<typeof placeRowSchema>
 
 const bookmarkRowSchema = z.object({
   bookmarked_at: z.string(),
@@ -83,13 +86,6 @@ const sessionStoreSchema = z.object({
 })
 
 const MOZLZ4_MAGIC = new TextEncoder().encode('mozLz40\0')
-
-function localDateStamp(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
 
 function localIso(d: Date): string {
   const y = d.getFullYear()
@@ -152,9 +148,12 @@ function snapshotSqlite(
   return target
 }
 
-function readPlaces(db: Database, since: Date): unknown {
+function readPlaces(db: Database, since: Date, until: Date): unknown {
   try {
-    return db.query(QUERY_PLACES).all({ $sinceMicros: since.getTime() * 1000 })
+    return db.query(QUERY_PLACES).all({
+      $sinceMicros: since.getTime() * 1000,
+      $untilMicros: until.getTime() * 1000,
+    })
   } catch (cause) {
     const detail = cause instanceof Error ? cause.message : String(cause)
     throw new LocalFirefoxFailure({
@@ -239,9 +238,11 @@ const QUERY_PLACES = `
       END AS url
     FROM moz_places
     WHERE last_visit_date > $sinceMicros
+      AND last_visit_date < $untilMicros
   )
   SELECT
     datetime(MAX(last_visit_date) / 1000000, 'unixepoch', 'localtime') AS visited,
+    strftime('%Y-%m-%d', MAX(last_visit_date) / 1000000, 'unixepoch') AS routing_day,
     url,
     COALESCE(title, '') AS title,
     COALESCE(SUM(visit_count), 0) AS visit_count,
@@ -365,6 +366,7 @@ function buildOpenTabRows(
 function readPlacesFromProfile(
   profileDir: string,
   since: Date,
+  until: Date,
 ): { places: unknown; bookmarks: unknown } {
   const snapshotPath = snapshotSqlite(profileDir, 'places.sqlite', 'snapshot')
   try {
@@ -380,7 +382,7 @@ function readPlacesFromProfile(
       })
     }
     try {
-      const places = readPlaces(db, since)
+      const places = readPlaces(db, since, until)
       const bookmarks = readBookmarks(db)
       return { places, bookmarks }
     } finally {
@@ -521,97 +523,125 @@ export function ingestLocalFirefox(opts: {
   machine: string
   profileDir: string
   blocklistPath?: string
+  // When false (a backfill run, explicit --until), the snapshot-shaped
+  // sub-sources (bookmarks, open-tabs, synced-tabs) are skipped so the run
+  // only ever writes past day-buckets. Defaults to true.
+  includeSnapshots?: boolean
 }): Source {
+  const includeSnapshots = opts.includeSnapshots ?? true
   return {
     machine: opts.machine,
     source: 'firefox',
     pull: async ({ dataDir, since, until }) => {
       const blocklist = loadBlocklist(opts.blocklistPath)
-      const now = new Date()
-      // Per-day grouping of history rows and the strict `until` upper bound
-      // (a `last_visit_date < until` query clause) are deferred to dream-iba4;
-      // for now the whole pull lands in the day-bucket of the window's last
-      // instant.
-      const outDir = path.join(
-        dataDir,
-        utcDay(new Date(until.getTime() - 1)),
-        opts.machine,
-        'firefox',
-      )
-      await mkdir(outDir, { recursive: true })
       const { places: placesRaw, bookmarks: bookmarksRaw } =
-        readPlacesFromProfile(opts.profileDir, since)
-      const syncedTabs = readSyncedTabsFromProfile(opts.profileDir)
-      const localTabs = readSessionStore(opts.profileDir, opts.machine)
-      // last_used is ISO `YYYY-MM-DD HH:MM:SS` — lexicographic order matches
-      // chronological order, so a string compare sorts the merged list.
-      const openTabs = [...localTabs, ...syncedTabs].sort((a, b) =>
-        b.last_used.localeCompare(a.last_used),
-      )
+        readPlacesFromProfile(opts.profileDir, since, until)
 
       const allRows = placeRowsSchema.parse(placesRaw)
       const rows = allRows.filter((r) => !isBlocked(r.url, blocklist))
       const blocklistFiltered = allRows.length - rows.length
-      const bookmarkRows = bookmarkRowsSchema.parse(bookmarksRaw)
 
-      const stamp = localDateStamp(now)
-
-      const historyLines = ['visited,url,title,visit_count,frecency,typed']
+      // History rows route to the UTC day of their most-recent visit, so a
+      // backfill window is split across one history.csv per day-bucket. When
+      // snapshots are included, the snapshot day is seeded so its bucket
+      // always gets a (possibly header-only) history.csv alongside the
+      // bookmarks/open-tabs snapshots — a complete firefox dataset per day.
+      const snapshotDay = utcDay(new Date(until.getTime() - 1))
+      const rowsByDay = new Map<string, PlaceRow[]>()
+      if (includeSnapshots) rowsByDay.set(snapshotDay, [])
       for (const r of rows) {
-        historyLines.push(
-          [
-            csvField(r.visited),
-            csvField(r.url),
-            csvField(r.title),
-            String(r.visit_count),
-            String(r.frecency),
-            String(r.typed),
-          ].join(','),
-        )
+        const dayRows = rowsByDay.get(r.routing_day) ?? []
+        dayRows.push(r)
+        rowsByDay.set(r.routing_day, dayRows)
       }
-      const historyPath = path.join(outDir, `${stamp}.history.csv`)
-      await Bun.write(historyPath, historyLines.join('\n') + '\n')
 
-      const bookmarksLines = ['bookmarked_at,url,title,guid']
-      for (const b of bookmarkRows) {
-        bookmarksLines.push(
-          [
-            csvField(b.bookmarked_at),
-            csvField(b.url),
-            csvField(b.title),
-            csvField(b.guid),
-          ].join(','),
-        )
+      let bytes = 0
+      let filesPulled = 0
+      for (const [day, dayRows] of rowsByDay) {
+        const dir = path.join(dataDir, day, opts.machine, 'firefox')
+        await mkdir(dir, { recursive: true })
+        const lines = ['visited,url,title,visit_count,frecency,typed']
+        for (const r of dayRows) {
+          lines.push(
+            [
+              csvField(r.visited),
+              csvField(r.url),
+              csvField(r.title),
+              String(r.visit_count),
+              String(r.frecency),
+              String(r.typed),
+            ].join(','),
+          )
+        }
+        const historyPath = path.join(dir, 'history.csv')
+        await Bun.write(historyPath, lines.join('\n') + '\n')
+        bytes += statSync(historyPath).size
+        filesPulled += 1
       }
-      const bookmarksPath = path.join(outDir, `${stamp}.bookmarks.csv`)
-      await Bun.write(bookmarksPath, bookmarksLines.join('\n') + '\n')
 
-      const openTabsLines = ['last_used,url,title,device,pinned']
-      for (const t of openTabs) {
-        openTabsLines.push(
-          [
-            csvField(t.last_used),
-            csvField(t.url),
-            csvField(t.title),
-            csvField(t.device),
-            csvField(t.pinned),
-          ].join(','),
+      let bookmarkRowCount = 0
+      let openTabRowCount = 0
+      if (includeSnapshots) {
+        // Snapshot sub-sources reflect "now"; they land in the window's last
+        // day-bucket (which is today on a normal, no-flag run).
+        const snapshotDir = path.join(
+          dataDir,
+          snapshotDay,
+          opts.machine,
+          'firefox',
         )
-      }
-      const openTabsPath = path.join(outDir, `${stamp}.open-tabs.csv`)
-      await Bun.write(openTabsPath, openTabsLines.join('\n') + '\n')
+        await mkdir(snapshotDir, { recursive: true })
 
-      const bytes =
-        statSync(historyPath).size +
-        statSync(bookmarksPath).size +
-        statSync(openTabsPath).size
+        const bookmarkRows = bookmarkRowsSchema.parse(bookmarksRaw)
+        const bookmarksLines = ['bookmarked_at,url,title,guid']
+        for (const b of bookmarkRows) {
+          bookmarksLines.push(
+            [
+              csvField(b.bookmarked_at),
+              csvField(b.url),
+              csvField(b.title),
+              csvField(b.guid),
+            ].join(','),
+          )
+        }
+        const bookmarksPath = path.join(snapshotDir, 'bookmarks.csv')
+        await Bun.write(bookmarksPath, bookmarksLines.join('\n') + '\n')
+
+        const syncedTabs = readSyncedTabsFromProfile(opts.profileDir)
+        const localTabs = readSessionStore(opts.profileDir, opts.machine)
+        // last_used is ISO `YYYY-MM-DD HH:MM:SS` — lexicographic order matches
+        // chronological order, so a string compare sorts the merged list.
+        const openTabs = [...localTabs, ...syncedTabs].sort((a, b) =>
+          b.last_used.localeCompare(a.last_used),
+        )
+        const openTabsLines = ['last_used,url,title,device,pinned']
+        for (const t of openTabs) {
+          openTabsLines.push(
+            [
+              csvField(t.last_used),
+              csvField(t.url),
+              csvField(t.title),
+              csvField(t.device),
+              csvField(t.pinned),
+            ].join(','),
+          )
+        }
+        const openTabsPath = path.join(snapshotDir, 'open-tabs.csv')
+        await Bun.write(openTabsPath, openTabsLines.join('\n') + '\n')
+
+        bytes += statSync(bookmarksPath).size + statSync(openTabsPath).size
+        bookmarkRowCount = bookmarkRows.length
+        openTabRowCount = openTabs.length
+        filesPulled += 2
+      }
+
       return {
-        files_pulled: 3,
+        files_pulled: filesPulled,
         bytes,
         rows: rows.length,
         blocklist_filtered: blocklistFiltered,
-        bookmark_rows: bookmarkRows.length,
-        open_tab_rows: openTabs.length,
+        bookmark_rows: bookmarkRowCount,
+        open_tab_rows: openTabRowCount,
       }
     },
   }

@@ -1,6 +1,7 @@
 import { Database } from 'bun:sqlite'
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -62,24 +63,15 @@ const ROOT_ID: Record<BookmarkRoot, number> = {
 }
 
 function readHistoryCsv(): string {
-  const files = readdirSync(outDir)
-  const file = files.find((f) => f.endsWith('.history.csv'))
-  if (!file) throw new Error('no history csv')
-  return readFileSync(path.join(outDir, file), 'utf-8')
+  return readFileSync(path.join(outDir, 'history.csv'), 'utf-8')
 }
 
 function readBookmarksCsv(): string {
-  const files = readdirSync(outDir)
-  const file = files.find((f) => f.endsWith('.bookmarks.csv'))
-  if (!file) throw new Error('no bookmarks csv')
-  return readFileSync(path.join(outDir, file), 'utf-8')
+  return readFileSync(path.join(outDir, 'bookmarks.csv'), 'utf-8')
 }
 
 function readOpenTabsCsv(): string {
-  const files = readdirSync(outDir)
-  const file = files.find((f) => f.endsWith('.open-tabs.csv'))
-  if (!file) throw new Error('no open-tabs csv')
-  return readFileSync(path.join(outDir, file), 'utf-8')
+  return readFileSync(path.join(outDir, 'open-tabs.csv'), 'utf-8')
 }
 
 type SyncedTabEntry = {
@@ -299,10 +291,7 @@ describe('ingestLocalFirefox', () => {
     const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
 
     const files = readdirSync(outDir).sort()
-    expect(files).toHaveLength(3)
-    expect(files[0]).toMatch(/^\d{4}-\d{2}-\d{2}\.bookmarks\.csv$/)
-    expect(files[1]).toMatch(/^\d{4}-\d{2}-\d{2}\.history\.csv$/)
-    expect(files[2]).toMatch(/^\d{4}-\d{2}-\d{2}\.open-tabs\.csv$/)
+    expect(files).toEqual(['bookmarks.csv', 'history.csv', 'open-tabs.csv'])
     const csv = readHistoryCsv()
     const lines = csv.trim().split('\n')
     expect(lines[0]).toBe('visited,url,title,visit_count,frecency,typed')
@@ -1797,6 +1786,129 @@ describe('ingestLocalFirefox', () => {
         'https://middle.example/',
         'https://oldest.example/',
       ])
+    })
+  })
+
+  describe('per-day history routing', () => {
+    function historyCsvFor(day: string): string {
+      return readFileSync(
+        path.join(dataDir, day, 'm4x', 'firefox', 'history.csv'),
+        'utf-8',
+      )
+    }
+
+    test('routes each url row to the UTC day of its last visit', async () => {
+      const db = createPlacesDb([
+        {
+          url: 'https://day8.example/',
+          title: 'D8',
+          lastVisit: new Date('2026-05-08T10:00:00Z'),
+        },
+        {
+          url: 'https://day9.example/',
+          title: 'D9',
+          lastVisit: new Date('2026-05-09T22:00:00Z'),
+        },
+      ])
+      db.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      await src.pull({ dataDir, since: SINCE, until: UNTIL })
+
+      expect(historyCsvFor('2026-05-08')).toContain('https://day8.example/')
+      expect(historyCsvFor('2026-05-08')).not.toContain('https://day9.example/')
+      expect(historyCsvFor('2026-05-09')).toContain('https://day9.example/')
+    })
+
+    test('excludes url rows whose last visit is at or after until', async () => {
+      const db = createPlacesDb([
+        {
+          url: 'https://in.example/',
+          title: 'IN',
+          lastVisit: new Date('2026-05-09T10:00:00Z'),
+        },
+        {
+          url: 'https://after.example/',
+          title: 'AFTER',
+          lastVisit: new Date('2026-05-10T10:00:00Z'),
+        },
+      ])
+      db.close()
+
+      const src = ingestLocalFirefox({ machine: 'm4x', profileDir })
+      const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
+
+      expect(metrics.rows).toBe(1)
+      expect(historyCsvFor('2026-05-09')).toContain('https://in.example/')
+      expect(existsSync(path.join(dataDir, '2026-05-10'))).toBe(false)
+    })
+  })
+
+  describe('includeSnapshots', () => {
+    test('skips bookmarks and open-tabs entirely when false', async () => {
+      const db = createPlacesDb([
+        {
+          url: 'https://h.example/',
+          title: 'H',
+          lastVisit: new Date('2026-05-09T10:00:00Z'),
+        },
+      ])
+      insertBookmarks(db, [
+        {
+          url: 'https://bm.example/',
+          title: 'BM',
+          dateAdded: new Date('2026-05-09T09:00:00Z'),
+          guid: 'bm______0001',
+          root: 'unfiled',
+        },
+      ])
+      db.close()
+
+      const src = ingestLocalFirefox({
+        machine: 'm4x',
+        profileDir,
+        includeSnapshots: false,
+      })
+      const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
+
+      expect(readdirSync(outDir)).toEqual(['history.csv'])
+      expect(metrics.bookmark_rows).toBe(0)
+      expect(metrics.open_tab_rows).toBe(0)
+      expect(metrics.files_pulled).toBe(1)
+    })
+
+    test('writes bookmarks and open-tabs under the window bucket when true', async () => {
+      const db = createPlacesDb([
+        {
+          url: 'https://h.example/',
+          title: 'H',
+          lastVisit: new Date('2026-05-09T10:00:00Z'),
+        },
+      ])
+      insertBookmarks(db, [
+        {
+          url: 'https://bm.example/',
+          title: 'BM',
+          dateAdded: new Date('2026-05-09T09:00:00Z'),
+          guid: 'bm______0001',
+          root: 'unfiled',
+        },
+      ])
+      db.close()
+
+      const src = ingestLocalFirefox({
+        machine: 'm4x',
+        profileDir,
+        includeSnapshots: true,
+      })
+      const metrics = await src.pull({ dataDir, since: SINCE, until: UNTIL })
+
+      expect(readdirSync(outDir).sort()).toEqual([
+        'bookmarks.csv',
+        'history.csv',
+        'open-tabs.csv',
+      ])
+      expect(metrics.bookmark_rows).toBe(1)
     })
   })
 })
