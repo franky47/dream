@@ -69,6 +69,54 @@ const customMessageSchema = z
   })
   .passthrough()
 
+const compactionSchema = z.object({
+  type: z.literal('compaction'),
+  id: z.string(),
+  timestamp: z.string(),
+  firstKeptEntryId: z.string(),
+  summary: z.string(),
+  tokensBefore: z.number().optional(),
+})
+
+interface CompactionCut {
+  cutIndex: number
+  summary: string
+  tokensBefore: number | null
+  timestamp: string
+}
+
+function findCompactionCut(path: readonly Node[]): CompactionCut | null {
+  for (let i = path.length - 1; i >= 0; i -= 1) {
+    const node = path[i]
+    if (node === undefined || node.type !== 'compaction') continue
+    const parsed = compactionSchema.safeParse(node)
+    if (!parsed.success) continue
+    const cutIndex = path.findIndex(
+      (n) => n.id === parsed.data.firstKeptEntryId,
+    )
+    if (cutIndex === -1) continue
+    return {
+      cutIndex,
+      summary: parsed.data.summary,
+      tokensBefore: parsed.data.tokensBefore ?? null,
+      timestamp: parsed.data.timestamp,
+    }
+  }
+  return null
+}
+
+function compactionSummaryMessage(cut: CompactionCut): NormalizedMessage {
+  const attr =
+    cut.tokensBefore === null ? '' : ` tokensBefore="${cut.tokensBefore}"`
+  const text = `<compaction${attr}>\n${cut.summary}\n</compaction>`
+  const ts = Date.parse(cut.timestamp)
+  return {
+    role: 'user',
+    timestampMs: Number.isNaN(ts) ? null : ts,
+    parts: [{ kind: 'text', text }],
+  }
+}
+
 function joinText(
   items: ReadonlyArray<{ type: string; text?: string }>,
 ): string {
@@ -88,11 +136,15 @@ export function normalize(jsonlText: string): NormalizedSession {
 }
 
 export function normalizeTree(tree: PiTree): NormalizedSession {
-  const path = activePath(tree)
+  const fullPath = activePath(tree)
   const frontmatterYaml = frontmatterToYaml(buildFrontmatter(tree))
 
   const messages: NormalizedMessage[] = []
   const pending = new Map<string, PendingToolCall>()
+
+  const cut = findCompactionCut(fullPath)
+  const path = cut === null ? fullPath : fullPath.slice(cut.cutIndex)
+  if (cut !== null) messages.push(compactionSummaryMessage(cut))
 
   for (const node of path) {
     if (node.type === 'custom') continue

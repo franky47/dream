@@ -204,6 +204,74 @@ describe('renderPiSession', () => {
     )
   })
 
+  test('compaction on active path renders summary block in place of pre-cutoff history (real-shape fixture)', () => {
+    // Fixture shape mirrors a real Pi session with one compaction event;
+    // ids/text/paths are synthetic.
+    const input = jsonl(
+      sessionHeader,
+      {
+        type: 'message',
+        id: 'u1',
+        parentId: null,
+        timestamp: '2026-05-17T09:14:00.000Z',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: 'pre-cutoff question' }],
+        },
+      },
+      {
+        type: 'message',
+        id: 'a1',
+        parentId: 'u1',
+        timestamp: '2026-05-17T09:14:30.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'pre-cutoff answer' }],
+        },
+      },
+      {
+        type: 'compaction',
+        id: 'cmp',
+        parentId: 'a1',
+        timestamp: '2026-05-17T09:20:00.000Z',
+        firstKeptEntryId: 'u2',
+        summary: 'condensed pre-cutoff conversation',
+        tokensBefore: 8421,
+      },
+      {
+        type: 'message',
+        id: 'u2',
+        parentId: 'cmp',
+        timestamp: '2026-05-17T09:21:00.000Z',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: 'kept follow-up' }],
+        },
+      },
+      {
+        type: 'message',
+        id: 'a2',
+        parentId: 'u2',
+        timestamp: '2026-05-17T09:21:30.000Z',
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'kept reply' }],
+        },
+      },
+    )
+
+    const out = renderPiSession(input)
+
+    expect(out).toContain('<compaction tokensBefore="8421">')
+    expect(out).toContain('condensed pre-cutoff conversation')
+    expect(out).toContain('</compaction>')
+    expect(out).not.toContain('pre-cutoff question')
+    expect(out).not.toContain('pre-cutoff answer')
+    expect(out).toContain('kept follow-up')
+    expect(out).toContain('kept reply')
+    expect(out).toContain('sessionId: ses_1')
+  })
+
   test('custom_message routes through the fallback renderer', () => {
     const input = jsonl(sessionHeader, {
       type: 'custom_message',

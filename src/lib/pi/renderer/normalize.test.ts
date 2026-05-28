@@ -301,6 +301,185 @@ describe('normalize', () => {
     expect(tool.result?.details).toEqual({ diff: '-old\n+new' })
   })
 
+  test('compaction on active path drops history before firstKeptEntryId and emits a summary block', () => {
+    const compaction = {
+      type: 'compaction',
+      id: 'cmp1',
+      parentId: 'a1',
+      timestamp: '2026-05-17T09:20:00.000Z',
+      firstKeptEntryId: 'u2',
+      summary: 'pre-cutoff summary',
+      tokensBefore: 12345,
+    }
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'pre-1', '2026-05-17T09:15:00.000Z'),
+        assistantText('a1', 'u1', 'pre-2', '2026-05-17T09:15:01.000Z'),
+        compaction,
+        userMsg('u2', 'cmp1', 'after-cutoff', '2026-05-17T09:25:00.000Z'),
+        assistantText('a2', 'u2', 'kept reply', '2026-05-17T09:25:01.000Z'),
+      ),
+    )
+
+    expect(out.messages).toHaveLength(3)
+    const first = out.messages[0]
+    expect(first?.role).toBe('user')
+    const firstText = first?.parts[0]
+    expect(firstText?.kind).toBe('text')
+    if (firstText?.kind === 'text') {
+      expect(firstText.text).toContain('<compaction tokensBefore="12345">')
+      expect(firstText.text).toContain('pre-cutoff summary')
+      expect(firstText.text).toContain('</compaction>')
+    }
+    expect(out.messages[1]?.parts).toEqual([
+      { kind: 'text', text: 'after-cutoff' },
+    ])
+    expect(out.messages[2]?.parts).toEqual([
+      { kind: 'text', text: 'kept reply' },
+    ])
+  })
+
+  test('no compaction → output matches the baseline (no synthetic summary block)', () => {
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'hi'),
+        assistantText('a1', 'u1', 'hello'),
+      ),
+    )
+    expect(out.messages).toHaveLength(2)
+    for (const msg of out.messages) {
+      for (const part of msg.parts) {
+        if (part.kind === 'text') {
+          expect(part.text).not.toContain('<compaction')
+        }
+      }
+    }
+  })
+
+  test('compaction off the active path has no effect', () => {
+    // Active leaf is a2 (later than cmp1); a1's branch (with compaction
+    // as a dead leaf) is not walked.
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'hi', '2026-05-17T09:15:00.000Z'),
+        assistantText('a1', 'u1', 'old branch', '2026-05-17T09:15:01.000Z'),
+        {
+          type: 'compaction',
+          id: 'cmp1',
+          parentId: 'a1',
+          timestamp: '2026-05-17T09:15:30.000Z',
+          firstKeptEntryId: 'u1',
+          summary: 'should not appear',
+        },
+        assistantText('a2', 'u1', 'new branch', '2026-05-17T09:18:00.000Z'),
+      ),
+    )
+    for (const msg of out.messages) {
+      for (const part of msg.parts) {
+        if (part.kind === 'text') {
+          expect(part.text).not.toContain('should not appear')
+          expect(part.text).not.toContain('<compaction')
+        }
+      }
+    }
+  })
+
+  test('multiple compactions on the same path: latest wins for the earliest cutoff', () => {
+    // path: u1 → a1 → cmpA → u2 → a2 → cmpB → u3 → a3
+    // cmpA points to u2 (cuts u1+a1), cmpB points to u3 (cuts u1+a1+u2+a2 and cmpA).
+    // Expect: only the cmpB summary is emitted; u3 + a3 follow.
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'pre-1', '2026-05-17T09:15:00.000Z'),
+        assistantText('a1', 'u1', 'pre-2', '2026-05-17T09:15:01.000Z'),
+        {
+          type: 'compaction',
+          id: 'cmpA',
+          parentId: 'a1',
+          timestamp: '2026-05-17T09:16:00.000Z',
+          firstKeptEntryId: 'u2',
+          summary: 'older summary',
+        },
+        userMsg('u2', 'cmpA', 'mid-1', '2026-05-17T09:17:00.000Z'),
+        assistantText('a2', 'u2', 'mid-2', '2026-05-17T09:17:01.000Z'),
+        {
+          type: 'compaction',
+          id: 'cmpB',
+          parentId: 'a2',
+          timestamp: '2026-05-17T09:18:00.000Z',
+          firstKeptEntryId: 'u3',
+          summary: 'newer summary',
+        },
+        userMsg('u3', 'cmpB', 'post-1', '2026-05-17T09:19:00.000Z'),
+        assistantText('a3', 'u3', 'post-2', '2026-05-17T09:19:01.000Z'),
+      ),
+    )
+
+    expect(out.messages).toHaveLength(3)
+    const first = out.messages[0]?.parts[0]
+    expect(first?.kind).toBe('text')
+    if (first?.kind === 'text') {
+      expect(first.text).toContain('newer summary')
+      expect(first.text).not.toContain('older summary')
+    }
+    expect(out.messages[1]?.parts).toEqual([{ kind: 'text', text: 'post-1' }])
+    expect(out.messages[2]?.parts).toEqual([{ kind: 'text', text: 'post-2' }])
+  })
+
+  test('compaction without tokensBefore renders summary without the attribute', () => {
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'pre', '2026-05-17T09:15:00.000Z'),
+        {
+          type: 'compaction',
+          id: 'cmp',
+          parentId: 'u1',
+          timestamp: '2026-05-17T09:16:00.000Z',
+          firstKeptEntryId: 'u2',
+          summary: 'just a summary',
+        },
+        userMsg('u2', 'cmp', 'kept', '2026-05-17T09:17:00.000Z'),
+      ),
+    )
+    const first = out.messages[0]?.parts[0]
+    expect(first?.kind).toBe('text')
+    if (first?.kind === 'text') {
+      expect(first.text).toBe('<compaction>\njust a summary\n</compaction>')
+    }
+  })
+
+  test('compaction whose firstKeptEntryId is not on the active path is ignored', () => {
+    // firstKeptEntryId references a node that doesn't exist on this path.
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'first', '2026-05-17T09:15:00.000Z'),
+        {
+          type: 'compaction',
+          id: 'cmp',
+          parentId: 'u1',
+          timestamp: '2026-05-17T09:16:00.000Z',
+          firstKeptEntryId: 'nonexistent',
+          summary: 'orphan',
+        },
+        assistantText('a1', 'cmp', 'reply', '2026-05-17T09:17:00.000Z'),
+      ),
+    )
+    for (const msg of out.messages) {
+      for (const part of msg.parts) {
+        if (part.kind === 'text') {
+          expect(part.text).not.toContain('orphan')
+          expect(part.text).not.toContain('<compaction')
+        }
+      }
+    }
+  })
+
   test('model_change and thinking_level_change on active path are dropped from messages', () => {
     const out = normalize(
       jsonl(
