@@ -1,10 +1,11 @@
 ---
 # dream-sk72
 title: Refactor session renderer to generic core with Claude + OpenCode bindings
-status: todo
+status: completed
 type: epic
+priority: normal
 created_at: 2026-05-28T11:43:53Z
-updated_at: 2026-05-28T11:43:53Z
+updated_at: 2026-05-28T12:37:22Z
 ---
 
 ## Problem Statement
@@ -130,3 +131,13 @@ External behaviour only. Each layer is tested at its public seam:
 - The byte-identical Claude verification is the load-bearing assertion. If a real-session diff is non-empty, the refactor is wrong; debug normalize/preprocess/tools until the diff is empty. Don't ship a "small intentional difference" — there are none.
 - Dropping OpenCode `step-start`/`step-finish` parts in v1 also drops their `snapshot` hashes from the rendered output. Those hashes could be useful later for patch reconstruction. Flag this in the commit message; reversal is a normalizer change only.
 - The plan-of-attack and a more detailed walkthrough of every design-tree branch are captured in `PLAN-renderer-refactor.md` at the repo root.
+
+## Summary of Changes
+
+All three child slices shipped:
+
+- **dream-alv5** — generic renderer core extracted to `src/lib/renderer/` (turn markers, timestamp deltas, body composition, registry-based tool dispatch with fallback); Claude renderer reshaped as a thin binding (normalize → renderSession) holding only Claude-specific concerns (stripFraming, Edit fold, TodoWrite diff anchor). Byte-identical Claude output verified against a real session.
+- **dream-h1up** — OpenCode binding at `src/lib/opencode/renderer/` (normalize, frontmatter, tools-fallback, index). Tool registry empty in v1; fallback projects input as XML attributes. Drops reasoning/step-start/step-finish/patch/file/agent/subtask/compaction parts.
+- **dream-ou0u** — `local-opencode` and `ssh-opencode` ingest sources render a `.md` sibling for every `.jsonl` written by the splitter. Splitter surfaces `sessionPaths`; sources strip it before returning metrics. Demoed against the real OpenCode DB: 283 matched jsonl+md pairs.
+
+Outcome: a generic renderer core serves at least two materially different session shapes (Claude + OpenCode) before stabilising the API; Codex and Pi can land later by writing a normalizer + tool registry + frontmatter against the same `NormalizedSession` shape.
