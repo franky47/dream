@@ -66,6 +66,81 @@ describe('renderCodexSession', () => {
     expect(out.endsWith('\n')).toBe(true)
   })
 
+  test('renders exec_command + apply_patch via bespoke renderers end-to-end', () => {
+    const execOutput = [
+      'Chunk ID: ck1',
+      'Wall time: 0.123s',
+      'Process exited with code: 0',
+      'Original token count: 5',
+      'Output:',
+      '---',
+      'README.md',
+      'package.json',
+    ].join('\n')
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: src/foo.ts',
+      '@@ function bar()',
+      '-old',
+      '+new',
+      '*** End Patch',
+    ].join('\n')
+    const input = jsonl(
+      meta,
+      {
+        timestamp: '2026-05-22T18:44:00.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call',
+          name: 'exec_command',
+          call_id: 'c1',
+          arguments: '{"cmd":"ls"}',
+        },
+      },
+      {
+        timestamp: '2026-05-22T18:44:01.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'function_call_output',
+          call_id: 'c1',
+          output: execOutput,
+        },
+      },
+      {
+        timestamp: '2026-05-22T18:44:02.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'custom_tool_call',
+          name: 'apply_patch',
+          call_id: 'p1',
+          input: patch,
+        },
+      },
+      {
+        timestamp: '2026-05-22T18:44:03.000Z',
+        type: 'response_item',
+        payload: {
+          type: 'custom_tool_call_output',
+          call_id: 'p1',
+          output: 'Exit code: 0\nSuccess. Updated:\nM src/foo.ts',
+        },
+      },
+    )
+
+    const out = renderCodexSession(input)
+
+    expect(out).toContain(
+      '<tool name="exec_command" cmd="ls" exit="0" wall="0.123s">',
+    )
+    expect(out).toContain('README.md')
+    expect(out).toContain('package.json')
+    expect(out).toContain('<tool name="apply_patch" exit="0">')
+    expect(out).toContain('--- a/src/foo.ts')
+    expect(out).toContain('+++ b/src/foo.ts')
+    expect(out).toContain('-old')
+    expect(out).toContain('+new')
+  })
+
   test('drops noisy events end-to-end (agent_message, token_count, lifecycle)', () => {
     const input = jsonl(
       meta,
