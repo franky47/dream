@@ -146,7 +146,7 @@ describe('ingestLocalOpencode', () => {
       until: UNTIL,
     })
 
-    expect(readdirSync(outDir).sort()).toEqual(['ses_1.jsonl'])
+    expect(readdirSync(outDir).sort()).toEqual(['ses_1.jsonl', 'ses_1.md'])
     const content = readFileSync(path.join(outDir, 'ses_1.jsonl'), 'utf-8')
     const lines = content.trim().split('\n')
     expect(lines).toHaveLength(2)
@@ -163,5 +163,9 @@ describe('ingestLocalOpencode', () => {
       parts_pulled: 0,
       bytes: Buffer.byteLength(content),
     })
+
+    const md = readFileSync(path.join(outDir, 'ses_1.md'), 'utf-8')
+    expect(md.length).toBeGreaterThan(0)
+    expect(md).toContain('sessionId:')
   })
 })

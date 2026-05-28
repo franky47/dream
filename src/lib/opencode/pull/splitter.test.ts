@@ -79,6 +79,35 @@ describe('splitJsonlToSessionFiles', () => {
     expect(metrics.sessions_pulled).toBe(1)
     expect(metrics.messages_pulled).toBe(1)
     expect(metrics.parts_pulled).toBe(0)
+    expect(metrics.sessionPaths).toEqual([
+      path.join(bucket(DAY1), 'ses_1.jsonl'),
+    ])
+  })
+
+  test('sessionPaths lists every written session in write order', async () => {
+    const rows = [
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_a',
+        sessionId: 'ses_a',
+        time_updated: DAY1_MS,
+      }),
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_b',
+        sessionId: 'ses_b',
+        time_updated: DAY2_MS,
+      }),
+    ]
+    const metrics = await splitJsonlToSessionFiles({
+      lines: fromLines(rows),
+      dataDir,
+      machine: 'm4x',
+    })
+    expect(metrics.sessionPaths).toEqual([
+      path.join(bucket(DAY1), 'ses_a.jsonl'),
+      path.join(bucket(DAY2), 'ses_b.jsonl'),
+    ])
   })
 
   test('routes each session to the UTC day of its time_updated', async () => {
@@ -132,6 +161,7 @@ describe('splitJsonlToSessionFiles', () => {
       messages_pulled: 0,
       parts_pulled: 0,
       bytes: 0,
+      sessionPaths: [],
     })
   })
 

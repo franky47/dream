@@ -129,7 +129,9 @@ describe('runSshOpencodePipeline', () => {
 
     expect(listFiles(dataDir)).toEqual([
       `${DAY1}/fake/opencode/ses_a.jsonl`,
+      `${DAY1}/fake/opencode/ses_a.md`,
       `${DAY2}/fake/opencode/ses_b.jsonl`,
+      `${DAY2}/fake/opencode/ses_b.md`,
     ])
     expect(result.sessions_pulled).toBe(2)
     expect(result.messages_pulled).toBe(1)
@@ -137,6 +139,9 @@ describe('runSshOpencodePipeline', () => {
     expect(
       readFileSync(path.join(bucket(DAY1), 'ses_a.jsonl'), 'utf-8'),
     ).toContain('"id":"msg_a"')
+    expect(
+      readFileSync(path.join(bucket(DAY1), 'ses_a.md'), 'utf-8'),
+    ).toContain('sessionId:')
   })
 
   test('handles an empty stdout (no recent sessions) as success', async () => {

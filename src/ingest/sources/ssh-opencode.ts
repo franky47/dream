@@ -4,6 +4,7 @@ import {
   buildProjectionSql,
   splitJsonlToSessionFiles,
 } from '#lib/opencode/pull'
+import { renderOpencodeSession } from '#lib/opencode/renderer'
 import type { Source } from '#src/ingest/orchestrator'
 
 const SOURCE = 'opencode'
@@ -97,7 +98,7 @@ export async function runSshOpencodePipeline(opts: {
     machine: opts.host,
   })
 
-  const [metrics, sshExit, sshStderr] = await Promise.all([
+  const [splitResult, sshExit, sshStderr] = await Promise.all([
     splitterPromise,
     proc.exited,
     readAll(proc.stderr),
@@ -112,6 +113,13 @@ export async function runSshOpencodePipeline(opts: {
       sshExit,
       stderr,
     })
+  }
+
+  const { sessionPaths, ...metrics } = splitResult
+  for (const jsonlPath of sessionPaths) {
+    const jsonlText = await Bun.file(jsonlPath).text()
+    const md = renderOpencodeSession(jsonlText)
+    await Bun.write(jsonlPath.replace(/\.jsonl$/, '.md'), md)
   }
 
   return metrics

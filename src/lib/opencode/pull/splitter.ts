@@ -10,6 +10,7 @@ export type SplitterMetrics = {
   messages_pulled: number
   parts_pulled: number
   bytes: number
+  sessionPaths: string[]
 }
 
 const rowEnvelopeSchema = z.object({
@@ -36,6 +37,7 @@ export async function splitJsonlToSessionFiles(opts: {
     messages_pulled: 0,
     parts_pulled: 0,
     bytes: 0,
+    sessionPaths: [],
   }
   let currentSessionId: string | null = null
   let handle: FileHandle | null = null
@@ -54,7 +56,9 @@ export async function splitJsonlToSessionFiles(opts: {
         'opencode',
       )
       await mkdir(dir, { recursive: true })
-      handle = await open(path.join(dir, `${env.sessionId}.jsonl`), 'w')
+      const sessionPath = path.join(dir, `${env.sessionId}.jsonl`)
+      handle = await open(sessionPath, 'w')
+      metrics.sessionPaths.push(sessionPath)
       currentSessionId = env.sessionId
     }
     if (handle === null) throw new Error('unreachable: handle is null')

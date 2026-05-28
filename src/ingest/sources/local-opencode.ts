@@ -3,6 +3,7 @@ import { homedir } from 'node:os'
 import path from 'node:path'
 
 import { projectRows, splitJsonlToSessionFiles } from '#lib/opencode/pull'
+import { renderOpencodeSession } from '#lib/opencode/renderer'
 import type { Source } from '#src/ingest/orchestrator'
 
 const DEFAULT_DB_PATH = path.join(
@@ -35,11 +36,17 @@ export function ingestLocalOpencode(opts: {
           sinceMs: since.getTime(),
           untilMs: until.getTime(),
         })
-        return await splitJsonlToSessionFiles({
+        const { sessionPaths, ...metrics } = await splitJsonlToSessionFiles({
           lines: arrayToAsyncIterable(rows),
           dataDir,
           machine: opts.machine,
         })
+        for (const jsonlPath of sessionPaths) {
+          const jsonlText = await Bun.file(jsonlPath).text()
+          const md = renderOpencodeSession(jsonlText)
+          await Bun.write(jsonlPath.replace(/\.jsonl$/, '.md'), md)
+        }
+        return metrics
       } finally {
         db.close()
       }
