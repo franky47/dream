@@ -7,6 +7,7 @@ import { parseConfig } from '#src/config'
 import { buildRunLog, runLogFileName } from '#src/ingest/log'
 import { IngestFatal, run, type Source } from '#src/ingest/orchestrator'
 import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
+import { ingestLocalCodex } from '#src/ingest/sources/local-codex'
 import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 import { ingestLocalOpencode } from '#src/ingest/sources/local-opencode'
 import { ingestSshClaude } from '#src/ingest/sources/ssh-claude'
@@ -33,6 +34,10 @@ async function main(): Promise<number> {
       sourceDir: path.join(homedir(), '.claude', 'projects'),
     }),
     ingestLocalOpencode({ machine: cfg.machine }),
+    ingestLocalCodex({
+      machine: cfg.machine,
+      sourceDir: path.join(homedir(), '.codex'),
+    }),
     ...cfg.remoteClaudeHosts.map((host) => ingestSshClaude({ host })),
     ...cfg.remoteOpencodeHosts.map((host) => ingestSshOpencode({ host })),
     ...cfg.firefoxProfiles.map((name) =>

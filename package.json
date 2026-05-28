@@ -6,6 +6,7 @@
     "#lib/claude/renderer": "./src/lib/claude/renderer/index.ts",
     "#lib/opencode/pull": "./src/lib/opencode/pull/index.ts",
     "#lib/opencode/renderer": "./src/lib/opencode/renderer/index.ts",
+    "#lib/codex/renderer": "./src/lib/codex/renderer/index.ts",
     "#lib/*": "./src/lib/*.ts"
   },
   "scripts": {
