@@ -1,11 +1,11 @@
 ---
 # dream-alv5
 title: Generic renderer core + Claude rebound (byte-identical)
-status: todo
+status: completed
 type: feature
 priority: high
 created_at: 2026-05-28T11:46:46Z
-updated_at: 2026-05-28T11:46:46Z
+updated_at: 2026-05-28T12:01:08Z
 parent: dream-sk72
 ---
 
@@ -24,14 +24,14 @@ Scope of this slice:
 
 ## Acceptance criteria
 
-- [ ] `src/lib/renderer/` exists with `types.ts`, `render.ts`, and `render.test.ts`. No agent-specific imports or knowledge.
-- [ ] Generic-core tests cover: turn marker emission, `t="0"` first-stamp logic, monotonic delta formatting, messages with missing timestamps, empty-body messages emit bare turn marker, tool dispatch via registry, fallback for unknown tool name, state seeded by preprocess and mutated across tool calls.
-- [ ] `src/lib/claude/renderer/` has `normalize.ts`, `preprocess.ts`, `tools.ts` (registry shape), `framing.ts`, `frontmatter.ts`, `entries.ts`, `index.ts`. The old monolithic `render.ts` driver is deleted.
-- [ ] `renderClaudeSession(jsonl): string` keeps its export name and signature. `src/ingest/sources/local-claude.ts` and `src/ingest/sources/ssh-claude.ts` are not modified.
-- [ ] Existing Claude renderer tests pass without behavioural changes (mechanical import-path tweaks allowed).
-- [ ] Byte-identical verification: pick at least one real session under `~/.claude/projects/-Users-franky-dev-playground-ai-dream/`, render with pre-refactor code and post-refactor code, `diff` is empty.
-- [ ] `bun check` clean.
-- [ ] `src/lib/` does not import `src/ingest/`. Per-agent bindings import from `src/lib/renderer/`, not the other way around.
+- [x] `src/lib/renderer/` exists with `types.ts`, `render.ts`, and `render.test.ts`. No agent-specific imports or knowledge.
+- [x] Generic-core tests cover: turn marker emission, `t="0"` first-stamp logic, monotonic delta formatting, messages with missing timestamps, empty-body messages emit bare turn marker, tool dispatch via registry, fallback for unknown tool name, state seeded by preprocess and mutated across tool calls.
+- [x] `src/lib/claude/renderer/` has `normalize.ts`, `preprocess.ts`, `tools.ts` (registry shape), `framing.ts`, `frontmatter.ts`, `entries.ts`, `index.ts`. The old monolithic `render.ts` driver is deleted.
+- [x] `renderClaudeSession(jsonl): string` keeps its export name and signature. `src/ingest/sources/local-claude.ts` and `src/ingest/sources/ssh-claude.ts` are not modified.
+- [x] Existing Claude renderer tests pass without behavioural changes (mechanical import-path tweaks allowed).
+- [x] Byte-identical verification: pick at least one real session under `~/.claude/projects/-Users-franky-dev-playground-ai-dream/`, render with pre-refactor code and post-refactor code, `diff` is empty.
+- [x] `bun check` clean.
+- [x] `src/lib/` does not import `src/ingest/`. Per-agent bindings import from `src/lib/renderer/`, not the other way around.
 
 ## User stories addressed
 
@@ -46,3 +46,23 @@ Reference by number from the parent PRD (`dream-sk72`):
 - User story 10
 - User story 17
 - User story 18
+
+## Summary of Changes
+
+Generic renderer core lives at `src/lib/renderer/`:
+
+- `types.ts` — `NormalizedSession`, `NormalizedMessage`, `Part` (text/tool union), `ToolPart`, `ToolResult`, `RenderConfig<S>`, `RenderCtx<S>`, `ToolRenderer<S>`. `TextPart` is internal (consumed via `Extract<Part, { kind: 'text' }>`).
+- `render.ts` — `renderSession<S>(session, config)`: emits frontmatter, walks messages, emits turn markers with `t="0"` first-stamp + `+MMmSSs` deltas, dispatches tool parts via registry with fallback, skips empty-string renderer output (the Edit-absorbed quirk).
+- `render.test.ts` — synthetic `NormalizedSession` fixtures cover all required behaviors with zero Claude knowledge.
+
+Claude binding reshaped at `src/lib/claude/renderer/`:
+
+- `framing.ts` — `stripFraming` extracted (was in `entries.ts`).
+- `normalize.ts` — `normalize(jsonl) → NormalizedSession`: parses entries, builds tool_result map, lifts/links results into assistant `ToolPart.result`, applies `stripFraming` to user text, drops `thinking` parts and `DROPPED_ENTRY_TYPES`, preserves bare-marker user entries.
+- `preprocess.ts` — `ClaudeState` (`editStats`, `editAbsorbed`, mutable `lastTodos`) + `claudePreprocess` runs Edit-fold over linked tool parts.
+- `tools.ts` — per-tool helpers retained (existing tests target them). New `claudeTools` registry + `claudeFallback` adapt them to `ToolRenderer<ClaudeState>`.
+- `index.ts` — thin wrapper: `renderClaudeSession(jsonl) = renderSession(normalize(jsonl), { preprocess, tools, fallback })`. Old monolithic `render.ts` deleted.
+
+Byte-identical verification: rendered all 31 real sessions under `~/.claude/projects/-Users-franky-dev-playground-ai-dream/` before and after — `diff -r` empty (only the in-flight session file differs because it grows as work happens).
+
+`local-claude.ts` / `ssh-claude.ts` untouched. `bun check` clean (220 tests, 0 lint/type/knip warnings).

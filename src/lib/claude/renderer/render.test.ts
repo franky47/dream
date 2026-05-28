@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { renderClaudeSession } from './render.ts'
+import { renderClaudeSession } from './index.ts'
 
 function jsonl(...entries: ReadonlyArray<unknown>): string {
   return entries.map((e) => JSON.stringify(e)).join('\n')

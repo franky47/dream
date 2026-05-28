@@ -1,6 +1,10 @@
 import { diffLines } from 'diff'
 import { z } from 'zod'
 
+import type { ToolRenderer } from '#lib/renderer/types'
+
+import type { ClaudeState } from './preprocess.ts'
+
 export interface ToolUseInput {
   name: string
   input: Record<string, unknown>
@@ -195,3 +199,74 @@ export function renderUnknownTool(
   const attrPart = attrs.length > 0 ? ` ${attrs}` : ''
   return `<tool name="${attrEscape(use.name)}"${attrPart}${errorAttr}/>`
 }
+
+const todoItemSchema = z.object({
+  content: z.string(),
+  status: z.string(),
+})
+
+function asTodos(v: unknown): TodoItem[] {
+  if (!Array.isArray(v)) return []
+  const out: TodoItem[] = []
+  for (const item of v) {
+    const parsed = todoItemSchema.safeParse(item)
+    if (parsed.success) out.push(parsed.data)
+  }
+  return out
+}
+
+function asFilePath(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+const renderEdit: ToolRenderer<ClaudeState> = (tool, { state }) => {
+  if (tool.id !== '' && state.editAbsorbed.has(tool.id)) return ''
+  const cached = tool.id !== '' ? state.editStats.get(tool.id) : undefined
+  const stats =
+    cached ??
+    (() => {
+      const s = editStats(
+        asString(tool.input.old_string),
+        asString(tool.input.new_string),
+      )
+      return { patches: 1, added: s.added, removed: s.removed }
+    })()
+  return renderEditTool(asFilePath(tool.input.file_path), stats)
+}
+
+const adapt =
+  (
+    fn: (use: ToolUseInput, result: ToolResult | undefined) => string,
+  ): ToolRenderer<ClaudeState> =>
+  (tool) =>
+    fn({ name: tool.name, input: tool.input }, tool.result)
+
+const adaptNoResult =
+  (fn: (use: ToolUseInput) => string): ToolRenderer<ClaudeState> =>
+  (tool) =>
+    fn({ name: tool.name, input: tool.input })
+
+const renderTodo: ToolRenderer<ClaudeState> = (tool, { state }) => {
+  const current = asTodos(tool.input.todos)
+  const xml = renderTodoWriteTool(state.lastTodos, current)
+  state.lastTodos = current
+  return xml
+}
+
+export const claudeTools: Record<string, ToolRenderer<ClaudeState>> = {
+  Edit: renderEdit,
+  Bash: adapt(renderBashTool),
+  Write: adaptNoResult(renderWriteTool),
+  Read: adaptNoResult(renderReadTool),
+  Glob: adaptNoResult(renderGlobTool),
+  Grep: adaptNoResult(renderGrepTool),
+  Skill: adaptNoResult(renderSkillTool),
+  WebFetch: adaptNoResult(renderWebFetchTool),
+  WebSearch: adaptNoResult(renderWebSearchTool),
+  Agent: adaptNoResult(renderAgentTool),
+  AskUserQuestion: adapt(renderAskUserQuestionTool),
+  TodoWrite: renderTodo,
+}
+
+export const claudeFallback: ToolRenderer<ClaudeState> =
+  adapt(renderUnknownTool)

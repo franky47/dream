@@ -2,12 +2,8 @@ import path from 'node:path'
 
 import { z } from 'zod'
 
-import {
-  type ClaudeEntry,
-  entryText,
-  parseEntries,
-  stripFraming,
-} from './entries.ts'
+import { type ClaudeEntry, entryText, parseEntries } from './entries.ts'
+import { stripFraming } from './framing.ts'
 
 const RENDERER_VERSION = 'claude-md@1'
 
