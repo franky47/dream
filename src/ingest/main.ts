@@ -10,6 +10,7 @@ import { ingestLocalClaude } from '#src/ingest/sources/local-claude'
 import { ingestLocalCodex } from '#src/ingest/sources/local-codex'
 import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 import { ingestLocalOpencode } from '#src/ingest/sources/local-opencode'
+import { ingestLocalPi } from '#src/ingest/sources/local-pi'
 import { ingestSshClaude } from '#src/ingest/sources/ssh-claude'
 import { ingestSshOpencode } from '#src/ingest/sources/ssh-opencode'
 import { resolveWindow } from '#src/ingest/window'
@@ -37,6 +38,10 @@ async function main(): Promise<number> {
     ingestLocalCodex({
       machine: cfg.machine,
       sourceDir: path.join(homedir(), '.codex'),
+    }),
+    ingestLocalPi({
+      machine: cfg.machine,
+      sourceDir: path.join(homedir(), '.pi', 'agent'),
     }),
     ...cfg.remoteClaudeHosts.map((host) => ingestSshClaude({ host })),
     ...cfg.remoteOpencodeHosts.map((host) => ingestSshOpencode({ host })),
