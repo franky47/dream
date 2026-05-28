@@ -15,7 +15,7 @@ const sessionHeader = {
 }
 
 describe('renderPiSession', () => {
-  test('renders frontmatter + turn markers + text + tool fallback end-to-end', () => {
+  test('renders frontmatter + turn markers + text + bespoke read end-to-end', () => {
     const input = jsonl(
       sessionHeader,
       {
@@ -67,7 +67,8 @@ describe('renderPiSession', () => {
     expect(out).toContain('<turn n="1" role="user" t="0"/>')
     expect(out).toContain('list files')
     expect(out).toContain('<turn n="2" role="assistant" t="+0m30s"/>')
-    expect(out).toContain('<tool name="read" path="/x"/>')
+    expect(out).toContain('<tool name="read" path="/x">')
+    expect(out).toContain('file body')
     expect(out.endsWith('\n')).toBe(true)
   })
 
@@ -93,6 +94,113 @@ describe('renderPiSession', () => {
     expect(out).toContain('<turn n="1" role="user"')
     expect(out).toContain(
       '<tool name="bashExecution" command="ls" exitCode="0" excludeFromContext="true"/>',
+    )
+  })
+
+  test('bespoke bash/read/edit/write renderers fire end-to-end on a multi-tool session', () => {
+    const input = jsonl(
+      sessionHeader,
+      {
+        type: 'message',
+        id: 'u1',
+        parentId: null,
+        timestamp: '2026-05-17T09:15:00.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'work' }] },
+      },
+      {
+        type: 'message',
+        id: 'a1',
+        parentId: 'u1',
+        timestamp: '2026-05-17T09:15:01.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'tc1',
+              name: 'bash',
+              arguments: { command: 'ls' },
+            },
+          ],
+        },
+      },
+      {
+        type: 'message',
+        id: 'r1',
+        parentId: 'a1',
+        timestamp: '2026-05-17T09:15:02.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'tc1',
+          toolName: 'bash',
+          content: [{ type: 'text', text: 'a\nb' }],
+        },
+      },
+      {
+        type: 'message',
+        id: 'a2',
+        parentId: 'r1',
+        timestamp: '2026-05-17T09:15:03.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            {
+              type: 'toolCall',
+              id: 'tc2',
+              name: 'read',
+              arguments: { path: '/foo.ts' },
+            },
+            {
+              type: 'toolCall',
+              id: 'tc3',
+              name: 'edit',
+              arguments: { path: '/foo.ts' },
+            },
+            {
+              type: 'toolCall',
+              id: 'tc4',
+              name: 'write',
+              arguments: { path: '/new.ts', content: 'hi\n' },
+            },
+          ],
+        },
+      },
+      {
+        type: 'message',
+        id: 'r2',
+        parentId: 'a2',
+        timestamp: '2026-05-17T09:15:04.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'tc2',
+          toolName: 'read',
+          content: [{ type: 'text', text: 'file body' }],
+        },
+      },
+      {
+        type: 'message',
+        id: 'r3',
+        parentId: 'r2',
+        timestamp: '2026-05-17T09:15:05.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'tc3',
+          toolName: 'edit',
+          content: [{ type: 'text', text: 'ok' }],
+          details: { diff: '-old\n+new' },
+        },
+      },
+    )
+
+    const out = renderPiSession(input)
+
+    expect(out).toContain('<tool name="bash" command="ls">')
+    expect(out).toContain('<tool name="read" path="/foo.ts">')
+    expect(out).toContain('<tool name="edit" path="/foo.ts">')
+    expect(out).toContain('-old')
+    expect(out).toContain('+new')
+    expect(out).toContain(
+      '<tool name="write" path="/new.ts" lines="1" bytes="3"/>',
     )
   })
 

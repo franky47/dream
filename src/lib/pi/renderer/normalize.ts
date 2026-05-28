@@ -143,7 +143,11 @@ export function normalizeTree(tree: PiTree): NormalizedSession {
       const target = pending.get(tr.data.message.toolCallId)
       if (target === undefined) continue
       const content = joinText(tr.data.message.content ?? [])
-      target.part.result = { content, isError: false } satisfies ToolResult
+      const result: ToolResult = { content, isError: false }
+      if (tr.data.message.details !== undefined) {
+        result.details = tr.data.message.details
+      }
+      target.part.result = result
       continue
     }
 

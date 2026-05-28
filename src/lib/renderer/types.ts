@@ -8,6 +8,7 @@ interface TextPart {
 export interface ToolResult {
   content: string
   isError: boolean
+  details?: unknown
 }
 
 export interface ToolPart {

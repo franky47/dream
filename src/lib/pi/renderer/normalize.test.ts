@@ -276,6 +276,31 @@ describe('normalize', () => {
     expect(tool.name).toBe('pi-splash')
   })
 
+  test('toolResult.details is forwarded to the pending tool result', () => {
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'edit it'),
+        toolCallMsg('a1', 'u1', 'tc1', 'edit', { path: '/foo.ts' }),
+        {
+          type: 'message',
+          id: 'r1',
+          parentId: 'a1',
+          timestamp: '2026-05-17T09:15:31.000Z',
+          message: {
+            role: 'toolResult',
+            toolCallId: 'tc1',
+            toolName: 'edit',
+            content: [{ type: 'text', text: 'ok' }],
+            details: { diff: '-old\n+new' },
+          },
+        },
+      ),
+    )
+    const tool = firstToolPart(out.messages[1]?.parts)
+    expect(tool.result?.details).toEqual({ diff: '-old\n+new' })
+  })
+
   test('model_change and thinking_level_change on active path are dropped from messages', () => {
     const out = normalize(
       jsonl(
