@@ -480,7 +480,7 @@ describe('normalize', () => {
     }
   })
 
-  test('model_change and thinking_level_change on active path are dropped from messages', () => {
+  test('model_change and thinking_level_change render inline as small status lines', () => {
     const out = normalize(
       jsonl(
         sessionHeader,
@@ -502,7 +502,115 @@ describe('normalize', () => {
         userMsg('u1', 'm1', 'hi'),
       ),
     )
-    expect(out.messages).toHaveLength(1)
-    expect(out.messages[0]?.role).toBe('user')
+    expect(out.messages).toHaveLength(3)
+    const thinkingPart = out.messages[0]?.parts[0]
+    expect(thinkingPart?.kind).toBe('text')
+    if (thinkingPart?.kind === 'text') {
+      expect(thinkingPart.text).toBe('> thinking_level: medium')
+    }
+    const modelPart = out.messages[1]?.parts[0]
+    expect(modelPart?.kind).toBe('text')
+    if (modelPart?.kind === 'text') {
+      expect(modelPart.text).toBe('> model: github-copilot/gpt-5')
+    }
+    expect(out.messages[2]?.parts).toEqual([{ kind: 'text', text: 'hi' }])
+  })
+
+  test('branch_summary on active path renders as a small summary block', () => {
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'hi', '2026-05-17T09:14:00.000Z'),
+        {
+          type: 'branch_summary',
+          id: 'bs1',
+          parentId: 'u1',
+          timestamp: '2026-05-17T09:14:30.000Z',
+          summary: 'branched off to explore',
+        },
+        assistantText('a1', 'bs1', 'ok', '2026-05-17T09:15:00.000Z'),
+      ),
+    )
+    expect(out.messages).toHaveLength(3)
+    const summaryPart = out.messages[1]?.parts[0]
+    expect(summaryPart?.kind).toBe('text')
+    if (summaryPart?.kind === 'text') {
+      expect(summaryPart.text).toBe(
+        '<branch_summary>\nbranched off to explore\n</branch_summary>',
+      )
+    }
+  })
+
+  test('label resolving to an active-path entry annotates that entry', () => {
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'tag me', '2026-05-17T09:14:00.000Z'),
+        {
+          type: 'label',
+          id: 'lbl1',
+          parentId: 'u1',
+          timestamp: '2026-05-17T09:14:30.000Z',
+          targetId: 'u1',
+          label: 'important',
+        },
+        assistantText('a1', 'lbl1', 'sure', '2026-05-17T09:15:00.000Z'),
+      ),
+    )
+    expect(out.messages).toHaveLength(2)
+    const labeled = out.messages[0]
+    expect(labeled?.parts).toEqual([
+      { kind: 'text', text: 'tag me' },
+      { kind: 'text', text: '[label: important]' },
+    ])
+    expect(out.messages[1]?.parts).toEqual([{ kind: 'text', text: 'sure' }])
+  })
+
+  test('label whose targetId is not on the active path is skipped', () => {
+    const out = normalize(
+      jsonl(
+        sessionHeader,
+        userMsg('u1', null, 'hi', '2026-05-17T09:14:00.000Z'),
+        {
+          type: 'label',
+          id: 'lbl1',
+          parentId: 'u1',
+          timestamp: '2026-05-17T09:14:30.000Z',
+          targetId: 'off-path-id',
+          label: 'orphan',
+        },
+        assistantText('a1', 'lbl1', 'reply', '2026-05-17T09:15:00.000Z'),
+      ),
+    )
+    for (const msg of out.messages) {
+      for (const part of msg.parts) {
+        if (part.kind === 'text') {
+          expect(part.text).not.toContain('orphan')
+          expect(part.text).not.toContain('[label:')
+        }
+      }
+    }
+  })
+
+  test('custom_message renders via fallback for scheduler-task, scheduler-deleted, pi-splash', () => {
+    for (const customType of [
+      'scheduler-task',
+      'scheduler-deleted',
+      'pi-splash',
+    ]) {
+      const out = normalize(
+        jsonl(sessionHeader, {
+          type: 'custom_message',
+          customType,
+          payload: 'data',
+          id: `cm-${customType}`,
+          parentId: null,
+          timestamp: '2026-05-17T09:14:00.000Z',
+        }),
+      )
+      expect(out.messages).toHaveLength(1)
+      const part = firstToolPart(out.messages[0]?.parts)
+      expect(part.name).toBe(customType)
+    }
   })
 })

@@ -78,6 +78,28 @@ const compactionSchema = z.object({
   tokensBefore: z.number().optional(),
 })
 
+const modelChangeSchema = z.object({
+  type: z.literal('model_change'),
+  provider: z.string(),
+  modelId: z.string(),
+})
+
+const thinkingLevelChangeSchema = z.object({
+  type: z.literal('thinking_level_change'),
+  thinkingLevel: z.string(),
+})
+
+const branchSummarySchema = z.object({
+  type: z.literal('branch_summary'),
+  summary: z.string(),
+})
+
+const labelSchema = z.object({
+  type: z.literal('label'),
+  targetId: z.string(),
+  label: z.string(),
+})
+
 interface CompactionCut {
   cutIndex: number
   summary: string
@@ -103,6 +125,21 @@ function findCompactionCut(path: readonly Node[]): CompactionCut | null {
     }
   }
   return null
+}
+
+function collectLabels(path: readonly Node[]): Map<string, string[]> {
+  const onPath = new Set(path.map((n) => n.id))
+  const out = new Map<string, string[]>()
+  for (const node of path) {
+    if (node.type !== 'label') continue
+    const parsed = labelSchema.safeParse(node)
+    if (!parsed.success) continue
+    if (!onPath.has(parsed.data.targetId)) continue
+    const list = out.get(parsed.data.targetId)
+    if (list === undefined) out.set(parsed.data.targetId, [parsed.data.label])
+    else list.push(parsed.data.label)
+  }
+  return out
 }
 
 function compactionSummaryMessage(cut: CompactionCut): NormalizedMessage {
@@ -146,47 +183,100 @@ export function normalizeTree(tree: PiTree): NormalizedSession {
   const path = cut === null ? fullPath : fullPath.slice(cut.cutIndex)
   if (cut !== null) messages.push(compactionSummaryMessage(cut))
 
+  const labelsByTargetId = collectLabels(path)
+
+  const appendLabels = (targetId: string, parts: Part[]): void => {
+    const labels = labelsByTargetId.get(targetId)
+    if (labels === undefined) return
+    for (const label of labels) {
+      parts.push({ kind: 'text', text: `[label: ${label}]` })
+    }
+  }
+
+  const emitStatus = (
+    timestampMs: number | null,
+    text: string,
+    nodeId: string,
+  ): void => {
+    const parts: Part[] = [{ kind: 'text', text }]
+    appendLabels(nodeId, parts)
+    messages.push({ role: 'user', timestampMs, parts })
+  }
+
   for (const node of path) {
     if (node.type === 'custom') continue
-    if (node.type === 'model_change') continue
-    if (node.type === 'thinking_level_change') continue
     if (node.type === 'session_info') continue
     if (node.type === 'label') continue
-    if (node.type === 'branch_summary') continue
     if (node.type === 'compaction') continue
 
     const ts = Date.parse(node.timestamp)
     const timestampMs = Number.isNaN(ts) ? null : ts
 
+    const model = modelChangeSchema.safeParse(node)
+    if (model.success) {
+      emitStatus(
+        timestampMs,
+        `> model: ${model.data.provider}/${model.data.modelId}`,
+        node.id,
+      )
+      continue
+    }
+
+    const thinking = thinkingLevelChangeSchema.safeParse(node)
+    if (thinking.success) {
+      emitStatus(
+        timestampMs,
+        `> thinking_level: ${thinking.data.thinkingLevel}`,
+        node.id,
+      )
+      continue
+    }
+
+    const bs = branchSummarySchema.safeParse(node)
+    if (bs.success) {
+      emitStatus(
+        timestampMs,
+        `<branch_summary>\n${bs.data.summary}\n</branch_summary>`,
+        node.id,
+      )
+      continue
+    }
+
     const cm = customMessageSchema.safeParse(node)
     if (cm.success) {
-      const part: ToolPart = {
-        kind: 'tool',
-        id: node.id,
-        name: cm.data.customType,
-        input: collectCustomMessageInput(node),
-      }
-      messages.push({ role: 'user', timestampMs, parts: [part] })
+      const parts: Part[] = [
+        {
+          kind: 'tool',
+          id: node.id,
+          name: cm.data.customType,
+          input: collectCustomMessageInput(node),
+        },
+      ]
+      appendLabels(node.id, parts)
+      messages.push({ role: 'user', timestampMs, parts })
       continue
     }
 
     const bash = bashExecPayloadSchema.safeParse(node)
     if (bash.success) {
-      const part: ToolPart = {
-        kind: 'tool',
-        id: node.id,
-        name: 'bashExecution',
-        input: {
-          command: bash.data.message.command,
-          exitCode: bash.data.message.exitCode,
-          excludeFromContext: bash.data.message.excludeFromContext ?? false,
+      const parts: Part[] = [
+        {
+          kind: 'tool',
+          id: node.id,
+          name: 'bashExecution',
+          input: {
+            command: bash.data.message.command,
+            exitCode: bash.data.message.exitCode,
+            excludeFromContext: bash.data.message.excludeFromContext ?? false,
+          },
+          result: {
+            content: bash.data.message.output,
+            isError: bash.data.message.exitCode !== 0,
+          },
         },
-        result: {
-          content: bash.data.message.output,
-          isError: bash.data.message.exitCode !== 0,
-        },
-      }
-      messages.push({ role: 'user', timestampMs, parts: [part] })
+      ]
+      appendLabels(node.id, parts)
+      messages.push({ role: 'user', timestampMs, parts })
       continue
     }
 
@@ -208,6 +298,7 @@ export function normalizeTree(tree: PiTree): NormalizedSession {
     const role = mapRole(msg.data.message.role)
     if (role === null) continue
     const parts = buildParts(msg.data.message.content ?? [], pending)
+    appendLabels(node.id, parts)
     messages.push({ role, timestampMs, parts })
   }
 

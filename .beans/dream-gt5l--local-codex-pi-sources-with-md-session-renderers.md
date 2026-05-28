@@ -1,11 +1,25 @@
 ---
 # dream-gt5l
 title: Local Codex & Pi sources with .md session renderers
-status: todo
+status: completed
 type: epic
 created_at: 2026-05-28T14:21:28Z
-updated_at: 2026-05-28T14:21:28Z
+updated_at: 2026-05-28T19:15:00Z
 ---
+
+## Summary of Changes
+
+All six child features shipped:
+
+- **dream-sohj** — Codex local source + renderer + memories pull (fallback-only).
+- **dream-v6yu** — Pi local source + renderer (linear active-path walk, fallback, bashExecution-aware).
+- **dream-s777** — Codex bespoke tool renderers for `exec_command` + `apply_patch`.
+- **dream-l0p3** — Pi bespoke tool renderers for `bash`, `read`, `edit`, `write` (with `details.diff` for edits).
+- **dream-hbmb** — Pi compaction substitution on the active branch (latest-wins cutoff, synthetic summary block).
+- **dream-lcey** — Pi metadata + extension events (`model_change`, `thinking_level_change`, `branch_summary`, `label`-with-targetId, `custom_message` fallback).
+
+The data lake now ingests Codex sessions + memories and Pi sessions on the same `<day>/<machine>/<source>/...` cadence as Claude/OpenCode, and publishes a `.md` sibling per session jsonl built atop the generic `src/lib/renderer/` core. Codex `.md` reads shell traces as parsed `exec_command` blocks and file edits as unified diffs; Pi `.md` reads as a linear transcript along the active branch with shape-aware bash/read/edit/write rendering, inline status events, and compaction substitution where applicable.
+
 
 ## Problem Statement
 
