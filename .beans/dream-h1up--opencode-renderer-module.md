@@ -1,11 +1,11 @@
 ---
 # dream-h1up
 title: OpenCode renderer module
-status: todo
+status: completed
 type: feature
 priority: high
 created_at: 2026-05-28T11:46:49Z
-updated_at: 2026-05-28T11:46:49Z
+updated_at: 2026-05-28T12:25:34Z
 parent: dream-sk72
 blocked_by:
     - dream-alv5
@@ -28,15 +28,15 @@ Scope of this slice:
 
 ## Acceptance criteria
 
-- [ ] `src/lib/opencode/renderer/` exists with `normalize.ts`, `frontmatter.ts`, `tools.ts`, `index.ts`, and co-located tests.
-- [ ] `renderOpencodeSession(jsonl): string` is exported from `src/lib/opencode/renderer`.
-- [ ] Normalizer drops `reasoning`, `step-start`, `step-finish`, `patch`, `file`, `agent`, `subtask`, `compaction` part types; keeps `text` and `tool`.
-- [ ] Tool parts are emitted with linked `result` when source `state.status` is `completed` (isError false) or `error` (isError true); `result` is undefined otherwise.
-- [ ] Non-string `state.output` is coerced via `JSON.stringify`.
-- [ ] Frontmatter YAML contains all listed fields and uses the same escape rules as the Claude frontmatter serialiser.
-- [ ] Fallback tool renderer produces `<tool name="..." attr="..."/>` projecting string/number/boolean keys from `input`, with `error="1"` on error result.
-- [ ] `bun check` clean.
-- [ ] No imports from `src/ingest/`. Imports `src/lib/renderer/` for shared types and driver.
+- [x] `src/lib/opencode/renderer/` exists with `normalize.ts`, `frontmatter.ts`, `tools.ts`, `index.ts`, and co-located tests.
+- [x] `renderOpencodeSession(jsonl): string` is exported from `src/lib/opencode/renderer`.
+- [x] Normalizer drops `reasoning`, `step-start`, `step-finish`, `patch`, `file`, `agent`, `subtask`, `compaction` part types; keeps `text` and `tool`.
+- [x] Tool parts are emitted with linked `result` when source `state.status` is `completed` (isError false) or `error` (isError true); `result` is undefined otherwise.
+- [x] Non-string `state.output` is coerced via `JSON.stringify`.
+- [x] Frontmatter YAML contains all listed fields and uses the same escape rules as the Claude frontmatter serialiser.
+- [x] Fallback tool renderer produces `<tool name="..." attr="..."/>` projecting string/number/boolean keys from `input`, with `error="1"` on error result.
+- [x] `bun check` clean.
+- [x] No imports from `src/ingest/`. Imports `src/lib/renderer/` for shared types and driver.
 
 ## User stories addressed
 
@@ -48,3 +48,14 @@ Reference by number from the parent PRD (`dream-sk72`):
 - User story 14
 - User story 15
 - User story 16
+
+## Summary of Changes
+
+New OpenCode renderer binding at `src/lib/opencode/renderer/`, built against the generic core from `dream-alv5`:
+
+- `frontmatter.ts` — Zod-typed `Frontmatter` (sessionId, cwd, project, startedAt, endedAt, turns, title, toolUses, providerID, modelID, agent, renderer='opencode-md@1'). `extractFrontmatter(jsonl)` walks rows once: session header for sessionId/cwd/title/project (basename(worktree) fallback when project.name is null), messages for turns + start/end stamps (ISO from ms), parts for toolUses, first assistant message for providerID/modelID, first agent-bearing message for agent. `frontmatterToYaml` mirrors Claude's escape rules (quote strings, escape `\` and `"`).
+- `normalize.ts` — three Zod schemas (message, text part, tool part) consume rows via `safeParse`; anything else (reasoning/step-start/step-finish/patch/file/agent/subtask/compaction or unparseable) is dropped silently. Parts are accumulated into a `Map<messageId, Part[]>`, then attached when walking messages in arrival order, so out-of-order parts still group correctly. Tool result mapping: `completed` → `{ content, isError: false }`; `error` → `{ content: state.output ?? state.error ?? '', isError: true }`; otherwise undefined. Non-string `state.output` is `JSON.stringify`'d.
+- `tools.ts` — `opencodeTools = {}` (registry empty in v1) + `opencodeFallback` emitting `<tool name="..." k="v"/>`. Projects only string/number/boolean input keys; XML-escapes `& < > " \n \r \t` in string values; appends `error="1"` when `result.isError`.
+- `index.ts` — `renderOpencodeSession(jsonl)` is `renderSession(normalize(jsonl), { preprocess: () => undefined as void, tools, fallback })`.
+
+Co-located tests (26 cases across `frontmatter.test.ts`, `tools.test.ts`, `normalize.test.ts`, `index.test.ts`) cover schema parsing, the dropped-part-type set, status→isError mapping, output coercion, fallback attribute projection + XML escaping, and an end-to-end render. Verified against a real session (`data/m4x/opencode/ses_1e57d3ee6ffe3pIJFcLvglAZe2.jsonl`, 275 rows) — frontmatter and turn-marker stream render as expected. `bun check` clean (246 tests, 0 lint/type/knip warnings). Ingest wiring lives in `dream-ou0u`; this slice ships the module only.
