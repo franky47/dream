@@ -1,24 +1,21 @@
-// Hermes frames a Discord-triggered user message by prepending platform-context
-// notes to the raw text it stores. Most of that framing helps a reader follow
-// the exchange and stays in the rendered Markdown:
+// Hermes frames a Discord-triggered user message by prepending a fixed control
+// note to the raw text it stores. The stored content looks like:
 //
-//   Sender: alice
-//   In reply to bob: "let's ship tomorrow"
-//   Attachment: diagram.pdf (application/pdf)
-//   [Reply to Discord message 1417900000000000000 to respond.]
+//   [Triggering message id: `1528089646876065802` — use as `message_id` for
+//   reply/react/pin via the discord tools.]
 //
-//   Can you review the deployment plan before we ship?
+//   [François Best] hey buddy, are you up?
 //
-// The bracketed line is different: it is a fixed instruction Hermes injects so
-// its Discord reply tool knows which message to answer. Only the snowflake ID
-// varies; the wording is constant. It is internal tool guidance, not part of the
-// human's message, so it is stripped from the readable view. The raw JSONL keeps
-// the stored content untouched.
+// The bracketed line is internal tool guidance: it tells Hermes' Discord tools
+// which message to reply to, react to, or pin. Only the snowflake id varies; the
+// wording is constant. It is not part of the human's message, so it is stripped
+// from the readable view. The `[Name]` sender prefix and the message body stay.
+// The raw JSONL keeps the stored content untouched.
 //
-// The pattern below is the single source of truth for that note. Sender, reply
-// and attachment notes use different wording and are deliberately left in place.
+// The pattern below is the single source of truth for that note. It tolerates
+// the backticks Hermes wraps around the id and the em dash in the wording.
 const DISCORD_TRIGGER_NOTE =
-  /^\[reply to discord message \d{17,20}(?: to respond\.?)?\]$/i
+  /^\[triggering message id:.*\d{17,20}.*discord tools\.?\]$/i
 
 function isTriggerNote(line: string): boolean {
   return DISCORD_TRIGGER_NOTE.test(line.trim())

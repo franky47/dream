@@ -8,16 +8,22 @@ import { z } from 'zod'
 // withdrawn work never reads as part of the live conversation and never skews a
 // fragment's time bounds, turn counts, or tool counts.
 //
-// Rewound rows and compaction-archived rows are both inactive. They stay
-// distinct because compaction is recognised from the summary's content marker,
-// not from this flag; that split is the compaction renderer's concern. Here we
-// only read the activity flag, so this predicate never mistakes an ordinary
-// live turn for a withdrawn one.
+// A rewound row and a compaction-archived row are both inactive (`active=0`),
+// so the activity flag alone cannot tell them apart. Compaction sets
+// `compacted=1` on the rows it archives; a `/undo` leaves `compacted=0`. Only
+// the `active=0, compacted=0` pair is a genuine rewind. Compaction-archived
+// rows (`active=0, compacted=1`) stay in the stream so they render in their
+// earlier context window.
 const activityFieldSchema = z.object({
   active: z.number().nullish(),
+  compacted: z.number().nullish(),
 })
 
 export function isRewound(row: unknown): boolean {
   const parsed = activityFieldSchema.safeParse(row)
-  return parsed.success && parsed.data.active === 0
+  return (
+    parsed.success &&
+    parsed.data.active === 0 &&
+    (parsed.data.compacted ?? 0) === 0
+  )
 }

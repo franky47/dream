@@ -25,16 +25,8 @@ function lines(...rows: string[]): string {
 }
 
 describe('hermesTools registry', () => {
-  test('registers every supported Hermes tool shape', () => {
-    expect(Object.keys(hermesTools).sort()).toEqual([
-      'clarify',
-      'patch',
-      'read',
-      'search',
-      'terminal',
-      'todo',
-      'write',
-    ])
+  test('registers only the verified Hermes tool shapes', () => {
+    expect(Object.keys(hermesTools).sort()).toEqual(['skill_view', 'terminal'])
   })
 })
 
@@ -99,23 +91,19 @@ describe('terminal renderer', () => {
     ).toBe(lines('<tool name="terminal" command="ls">', 'a', 'b', '</tool>'))
   })
 
-  test('retains exit and status from the result envelope', () => {
+  test('renders the workdir when present', () => {
     expect(
       callTool(
         'terminal',
         tool({
           name: 'terminal',
-          input: { command: 'false' },
-          result: {
-            content: 'out',
-            isError: false,
-            details: { exitCode: 1, status: 'timeout' },
-          },
+          input: { command: 'ls', workdir: '/src' },
+          result: { content: 'out', isError: false },
         }),
       ),
     ).toBe(
       lines(
-        '<tool name="terminal" command="false" exit="1" status="timeout">',
+        '<tool name="terminal" command="ls" workdir="/src">',
         'out',
         '</tool>',
       ),
@@ -129,19 +117,6 @@ describe('terminal renderer', () => {
         tool({ name: 'terminal', input: { command: 'ls' } }),
       ),
     ).toBe('<tool name="terminal" command="ls"/>')
-  })
-
-  test('ignores a malformed status envelope', () => {
-    expect(
-      callTool(
-        'terminal',
-        tool({
-          name: 'terminal',
-          input: { command: 'ls' },
-          result: { content: 'x', isError: false, details: 'nope' },
-        }),
-      ),
-    ).toBe(lines('<tool name="terminal" command="ls">', 'x', '</tool>'))
   })
 
   test('marks a failed terminal call with error="1"', () => {
@@ -173,283 +148,41 @@ describe('terminal renderer', () => {
   })
 })
 
-describe('read renderer', () => {
-  test('renders path with file content', () => {
+describe('skill_view renderer', () => {
+  test('shows which skill and file were viewed, self-closing', () => {
     expect(
       callTool(
-        'read',
+        'skill_view',
         tool({
-          name: 'read',
-          input: { path: '/etc/hosts' },
-          result: { content: 'l1\nl2', isError: false },
-        }),
-      ),
-    ).toBe(lines('<tool name="read" path="/etc/hosts">', 'l1', 'l2', '</tool>'))
-  })
-
-  test('renders offset and limit when present', () => {
-    expect(
-      callTool(
-        'read',
-        tool({
-          name: 'read',
-          input: { path: '/big', offset: 10, limit: 5 },
-          result: { content: 'chunk', isError: false },
+          name: 'skill_view',
+          input: { name: 'hermes-agent', file_path: 'references/webhooks.md' },
+          result: { content: 'huge skill body', isError: false },
         }),
       ),
     ).toBe(
-      lines(
-        '<tool name="read" path="/big" offset="10" limit="5">',
-        'chunk',
-        '</tool>',
-      ),
+      '<tool name="skill_view" skill="hermes-agent" file="references/webhooks.md"/>',
     )
   })
 
-  test('self-closing when content is empty', () => {
+  test('omits the file attribute when only the skill name is present', () => {
     expect(
       callTool(
-        'read',
+        'skill_view',
+        tool({ name: 'skill_view', input: { name: 'hermes-agent' } }),
+      ),
+    ).toBe('<tool name="skill_view" skill="hermes-agent"/>')
+  })
+
+  test('marks a failed skill_view with error="1"', () => {
+    expect(
+      callTool(
+        'skill_view',
         tool({
-          name: 'read',
-          input: { path: '/x' },
-          result: { content: '', isError: false },
+          name: 'skill_view',
+          input: { name: 'missing' },
+          result: { content: 'not found', isError: true },
         }),
       ),
-    ).toBe('<tool name="read" path="/x"/>')
-  })
-
-  test('marks a failed read with error="1"', () => {
-    expect(
-      callTool(
-        'read',
-        tool({
-          name: 'read',
-          input: { path: '/missing' },
-          result: { content: 'no such file', isError: true },
-        }),
-      ),
-    ).toBe(
-      lines(
-        '<tool name="read" path="/missing" error="1">',
-        'no such file',
-        '</tool>',
-      ),
-    )
-  })
-})
-
-describe('write renderer', () => {
-  test('summarizes with lines and bytes instead of copying content', () => {
-    expect(
-      callTool(
-        'write',
-        tool({
-          name: 'write',
-          input: { path: '/new.ts', content: 'a\nb\nc\n' },
-        }),
-      ),
-    ).toBe('<tool name="write" path="/new.ts" lines="3" bytes="6"/>')
-  })
-
-  test('handles missing content as zero stats', () => {
-    expect(
-      callTool('write', tool({ name: 'write', input: { path: '/empty.ts' } })),
-    ).toBe('<tool name="write" path="/empty.ts" lines="0" bytes="0"/>')
-  })
-
-  test('counts utf-8 bytes', () => {
-    expect(
-      callTool(
-        'write',
-        tool({ name: 'write', input: { path: '/u.txt', content: '€' } }),
-      ),
-    ).toBe('<tool name="write" path="/u.txt" lines="1" bytes="3"/>')
-  })
-
-  test('keeps a success write self-closing', () => {
-    expect(
-      callTool(
-        'write',
-        tool({
-          name: 'write',
-          input: { path: '/ok.ts', content: 'x' },
-          result: { content: 'wrote 1 byte', isError: false },
-        }),
-      ),
-    ).toBe('<tool name="write" path="/ok.ts" lines="1" bytes="1"/>')
-  })
-
-  test('shows the error body on a failed write', () => {
-    expect(
-      callTool(
-        'write',
-        tool({
-          name: 'write',
-          input: { path: '/ro.ts', content: 'x' },
-          result: { content: 'permission denied', isError: true },
-        }),
-      ),
-    ).toBe(
-      lines(
-        '<tool name="write" path="/ro.ts" lines="1" bytes="1" error="1">',
-        'permission denied',
-        '</tool>',
-      ),
-    )
-  })
-})
-
-describe('patch renderer', () => {
-  test('renders the diff body with path and exit', () => {
-    expect(
-      callTool(
-        'patch',
-        tool({
-          name: 'patch',
-          input: { path: '/foo.ts', diff: '@@ -1 +1 @@\n-old\n+new' },
-          result: { content: 'ok', isError: false, details: { exitCode: 0 } },
-        }),
-      ),
-    ).toBe(
-      lines(
-        '<tool name="patch" path="/foo.ts" exit="0">',
-        '@@ -1 +1 @@',
-        '-old',
-        '+new',
-        '</tool>',
-      ),
-    )
-  })
-
-  test('falls back to the patch field when diff is absent', () => {
-    expect(
-      callTool('patch', tool({ name: 'patch', input: { patch: '-a\n+b' } })),
-    ).toBe(lines('<tool name="patch">', '-a', '+b', '</tool>'))
-  })
-
-  test('self-closing when there is no diff', () => {
-    expect(
-      callTool('patch', tool({ name: 'patch', input: { path: '/foo.ts' } })),
-    ).toBe('<tool name="patch" path="/foo.ts"/>')
-  })
-
-  test('marks a failed patch with error="1"', () => {
-    expect(
-      callTool(
-        'patch',
-        tool({
-          name: 'patch',
-          input: { path: '/foo.ts', diff: '-a\n+b' },
-          result: { content: 'conflict', isError: true },
-        }),
-      ),
-    ).toBe(
-      lines(
-        '<tool name="patch" path="/foo.ts" error="1">',
-        '-a',
-        '+b',
-        '</tool>',
-      ),
-    )
-  })
-})
-
-describe('search renderer', () => {
-  test('renders query, path and match body', () => {
-    expect(
-      callTool(
-        'search',
-        tool({
-          name: 'search',
-          input: { query: 'TODO', path: '/src' },
-          result: { content: 'a.ts:1\nb.ts:2', isError: false },
-        }),
-      ),
-    ).toBe(
-      lines(
-        '<tool name="search" query="TODO" path="/src">',
-        'a.ts:1',
-        'b.ts:2',
-        '</tool>',
-      ),
-    )
-  })
-
-  test('omits path when absent and self-closes on no matches', () => {
-    expect(
-      callTool(
-        'search',
-        tool({
-          name: 'search',
-          input: { query: 'zzz' },
-          result: { content: '', isError: false },
-        }),
-      ),
-    ).toBe('<tool name="search" query="zzz"/>')
-  })
-})
-
-describe('todo renderer', () => {
-  test('renders a checklist with completed and pending marks', () => {
-    expect(
-      callTool(
-        'todo',
-        tool({
-          name: 'todo',
-          input: {
-            todos: [
-              { content: 'first', status: 'completed' },
-              { content: 'second', status: 'pending' },
-              { content: 'third' },
-            ],
-          },
-        }),
-      ),
-    ).toBe(
-      lines(
-        '<tool name="todo">',
-        '- [x] first',
-        '- [ ] second',
-        '- [ ] third',
-        '</tool>',
-      ),
-    )
-  })
-
-  test('self-closing on a malformed todo list', () => {
-    expect(
-      callTool('todo', tool({ name: 'todo', input: { todos: 'oops' } })),
-    ).toBe('<tool name="todo"/>')
-  })
-})
-
-describe('clarify renderer', () => {
-  test('renders the question with the answer body', () => {
-    expect(
-      callTool(
-        'clarify',
-        tool({
-          name: 'clarify',
-          input: { question: 'Which env?' },
-          result: { content: 'production', isError: false },
-        }),
-      ),
-    ).toBe(
-      lines(
-        '<tool name="clarify" question="Which env?">',
-        'production',
-        '</tool>',
-      ),
-    )
-  })
-
-  test('self-closing when unanswered', () => {
-    expect(
-      callTool(
-        'clarify',
-        tool({ name: 'clarify', input: { question: 'Which env?' } }),
-      ),
-    ).toBe('<tool name="clarify" question="Which env?"/>')
+    ).toBe('<tool name="skill_view" skill="missing" error="1"/>')
   })
 })

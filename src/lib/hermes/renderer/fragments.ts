@@ -14,33 +14,15 @@ import { hermesRenderConfig, renderHermesSession } from './session.ts'
 
 const RENDERER_VERSION = 'hermes-md@1'
 
-// Hermes wraps a compaction summary between stable bracket markers and prepends
-// a safety prefix that instructs the model. The renderer keeps only the body
-// between the markers, dropping the prefix and both markers.
-//
-// The marker has three recognised forms: the current build, an older build that
-// used a shorter tag before the "compaction" rename, and a merged summary that
-// folds an earlier window's summary into a later compaction. A merged body can
-// carry a nested current marker, so cleanup strips every known token, not just
-// the outer pair.
-interface MarkerForm {
-  begin: string
-  end: string
-}
-
-const MARKER_FORMS: readonly MarkerForm[] = [
-  { begin: '[hermes:compaction-summary]', end: '[/hermes:compaction-summary]' },
-  { begin: '[hermes:summary]', end: '[/hermes:summary]' },
-  {
-    begin: '[hermes:compaction-summary:merged]',
-    end: '[/hermes:compaction-summary:merged]',
-  },
-]
-
-const MARKER_TOKENS: readonly string[] = MARKER_FORMS.flatMap((form) => [
-  form.begin,
-  form.end,
-])
+// Hermes marks a compaction summary with a fixed instruction prefix and a fixed
+// end marker, both wrapping the real Markdown summary body. Detection keys on
+// the opening literal; cleaning drops everything through the instruction's final
+// `avoid repeating it:` phrase and the trailing end-marker line, leaving only
+// the summary the model was handed.
+const DETECTION_TOKEN = '[CONTEXT COMPACTION — REFERENCE ONLY]'
+const INSTRUCTION_END = 'avoid repeating it:'
+const END_MARKER =
+  '--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---'
 
 const sessionRowSchema = z.object({
   type: z.literal('session'),
@@ -51,15 +33,15 @@ const sessionRowSchema = z.object({
   archived: z.number().nullable().optional(),
 })
 
-// Permissive on role so tool-result rows (role "tool") survive to the normalize
-// pipeline instead of dropping out of the fragment stream. Downstream code owns
-// the role split; here every message row is a window member.
+// Permissive on role and content so tool-result rows (role "tool", whose content
+// is null when the payload lives elsewhere) and every other message row survive
+// to the normalize pipeline as window members. Downstream code owns the role
+// split; here every non-meta message row is a window member.
 const messageRowSchema = z.object({
   type: z.literal('message'),
   role: z.string(),
-  content: z.string(),
+  content: z.string().nullish(),
   createdAt: z.number(),
-  turn: z.number().optional(),
 })
 
 type SessionRow = z.infer<typeof sessionRowSchema>
@@ -98,36 +80,21 @@ function parseRows(jsonlText: string): unknown[] {
   return out
 }
 
-// The outer marker is whichever begin token appears earliest; a merged summary
-// opens with its own tag before any nested current tag. Detection needs that
-// literal token, so ordinary prose mentioning a summary is never mistaken for a
-// compaction event.
-function outerMarker(content: string): { form: MarkerForm; at: number } | null {
-  let best: { form: MarkerForm; at: number } | null = null
-  for (const form of MARKER_FORMS) {
-    const at = content.indexOf(form.begin)
-    if (at === -1) continue
-    if (best === null || at < best.at) best = { form, at }
-  }
-  return best
+function isCompactionSummary(content: string | null | undefined): boolean {
+  return typeof content === 'string' && content.startsWith(DETECTION_TOKEN)
 }
 
-function isCompactionSummary(content: string): boolean {
-  return outerMarker(content) !== null
-}
-
-// Keep the body between the outer begin marker and the last matching end marker,
-// falling back to the end of the content when Hermes wrote no closing marker.
-// Any nested markers a merged summary carried are stripped from the body.
+// Keep only the Markdown summary body: drop the instruction prefix through its
+// closing `avoid repeating it:` phrase (falling back to just the detection token
+// when Hermes changes the wording), then drop the trailing end-marker line.
 function cleanSummaryBody(content: string): string {
-  const outer = outerMarker(content)
-  if (outer === null) return content.trim()
-
-  const start = outer.at + outer.form.begin.length
-  const closeAt = content.lastIndexOf(outer.form.end)
-  const end = closeAt === -1 ? content.length : closeAt
-  let body = content.slice(start, end)
-  for (const token of MARKER_TOKENS) body = body.replaceAll(token, '')
+  const instructionAt = content.indexOf(INSTRUCTION_END)
+  const start =
+    instructionAt === -1
+      ? DETECTION_TOKEN.length
+      : instructionAt + INSTRUCTION_END.length
+  const endAt = content.indexOf(END_MARKER)
+  const body = endAt === -1 ? content.slice(start) : content.slice(start, endAt)
   return collapseBlankLines(body).trim()
 }
 
@@ -141,9 +108,8 @@ function collapseBlankLines(text: string): string {
 }
 
 function renderCompactionBlock(summary: MessageRow): string {
-  const body = cleanSummaryBody(summary.content)
-  const turnAttr = summary.turn === undefined ? '' : ` turn="${summary.turn}"`
-  return `<compaction${turnAttr} role="${summary.role}" t="0">\n${body}\n</compaction>`
+  const body = cleanSummaryBody(summary.content ?? '')
+  return `<compaction role="${summary.role}" t="0">\n${body}\n</compaction>`
 }
 
 function renderWindowBody(spec: WindowSpec): string {
@@ -226,14 +192,17 @@ function firstSession(raws: readonly unknown[]): SessionRow | null {
 }
 
 // Live message rows in order, each tagged with whether it opens a context
-// window. Rewound rows never enter the stream, so they cannot start a window or
-// skew a window's counts or time bounds.
+// window. Rewound rows (`active=0, compacted=0`) and empty `session_meta` rows
+// never enter the stream, so they cannot start a window or skew a window's
+// counts or time bounds. Compaction-archived rows (`active=0, compacted=1`)
+// stay, so they render in their earlier window.
 function collectEntries(raws: readonly unknown[]): MessageEntry[] {
   const out: MessageEntry[] = []
   for (const raw of raws) {
     if (isRewound(raw)) continue
     const parsed = messageRowSchema.safeParse(raw)
     if (!parsed.success) continue
+    if (parsed.data.role === 'session_meta') continue
     out.push({
       raw,
       row: parsed.data,

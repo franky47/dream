@@ -152,7 +152,7 @@ describe('splitJsonlToSessionFiles', () => {
     expect(result.message).toContain('hermes/echo')
   })
 
-  test('fails with source context on a message row with null content', async () => {
+  test('accepts a message row with null content (tool-only row)', async () => {
     const lines = [
       JSON.stringify({
         type: 'session',
@@ -160,19 +160,22 @@ describe('splitJsonlToSessionFiles', () => {
         sessionId: 'ses_a',
         latestMessageTime: DAY1_MS,
       }),
-      // A real db NULL projects as `"content":null`, which the renderer would
-      // silently drop; the gate rejects it instead.
-      `{"type":"message","id":"m","sessionId":"ses_a","role":"user","content":null,"createdAt":${DAY1_MS}}`,
+      // An assistant row carrying only tool_calls, or a tool result row whose
+      // payload lives in api_content, legitimately stores no text.
+      `{"type":"message","id":1,"sessionId":"ses_a","role":"assistant","content":null,"createdAt":${DAY1_MS}}`,
     ]
-    const result = await splitJsonlToSessionFiles({
+    const metrics = await splitJsonlToSessionFiles({
       lines: fromArray(lines),
       dataDir,
       machine: 'echo',
-    }).catch((e: unknown) => e)
+    })
 
-    expect(result).toBeInstanceOf(Error)
-    if (!(result instanceof Error)) throw new Error('unreachable')
-    expect(result.message).toContain('hermes/echo')
+    expect(metrics.messages_pulled).toBe(1)
+    const content = readFileSync(
+      path.join(bucket(DAY1), 'ses_a.jsonl'),
+      'utf-8',
+    )
+    expect(content).toContain('"content":null')
   })
 
   test('fails with source context on a message row with null createdAt', async () => {

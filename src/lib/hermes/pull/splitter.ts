@@ -34,16 +34,16 @@ const sessionHeaderSchema = z.object({
   latestMessageTime: z.number(),
 })
 
-// The renderer only keeps message rows whose `role`, `content` and `createdAt`
-// carry usable values; anything else it silently drops. Validating those fields
-// here, at the ingest gate, turns a would-be silent omission into a loud
-// failure and keeps `messages_pulled` honest. `content` is `NOT NULL` in the
-// state db, but a NULL would project as `"content":null`, which the string
-// requirement rejects rather than writing a half-empty transcript.
+// Every message row needs a `role` and a `createdAt` to route and render;
+// validating them here, at the ingest gate, turns a would-be silent omission
+// into a loud failure and keeps `messages_pulled` honest. `content` is nullable
+// in the state db: an assistant row carrying only `tool_calls` legitimately
+// stores no text. So the gate accepts `content: null` while still rejecting a
+// row with no role or no timestamp as truly malformed.
 const messageRowSchema = z.object({
   type: z.literal('message'),
   role: z.string(),
-  content: z.string(),
+  content: z.string().nullable(),
   createdAt: z.number(),
 })
 

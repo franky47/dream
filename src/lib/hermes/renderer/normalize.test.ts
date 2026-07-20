@@ -12,31 +12,46 @@ function textRow(role: string, content: string, createdAt: number): object {
   return { type: 'message', role, content, createdAt }
 }
 
+// An assistant turn stores its tool invocations inline as an OpenAI-shaped
+// `tool_calls` array; the arguments are a JSON string.
 function toolCallRow(
   call: { callId: string; name: string; input?: Record<string, unknown> },
   createdAt: number,
+  content: string | null = null,
 ): object {
   return {
     type: 'message',
     role: 'assistant',
-    content: JSON.stringify({ type: 'tool_call', ...call }),
+    content,
     createdAt,
+    toolCalls: [
+      {
+        id: call.callId,
+        call_id: call.callId,
+        type: 'function',
+        function: {
+          name: call.name,
+          arguments: JSON.stringify(call.input ?? {}),
+        },
+      },
+    ],
   }
 }
 
+// A tool result is a later `role='tool'` row keyed by `tool_call_id`; its content
+// is a JSON object such as `{"output":"..."}` or `{"success":false,...}`.
 function toolResultRow(
-  result: {
-    callId: string
-    output?: string
-    isError?: boolean
-    details?: unknown
-  },
+  result: { callId: string; output?: string; isError?: boolean },
   createdAt: number,
 ): object {
+  const body = result.isError
+    ? { success: false, output: result.output }
+    : { output: result.output }
   return {
     type: 'message',
     role: 'tool',
-    content: JSON.stringify({ type: 'tool_result', ...result }),
+    toolCallId: result.callId,
+    content: JSON.stringify(body),
     createdAt,
   }
 }
@@ -53,7 +68,10 @@ describe('normalize tool pairing', () => {
   test('pairs a tool-call row with its result by call id', () => {
     const session = normalize(
       jsonl([
-        toolCallRow({ callId: 'c1', name: 'read', input: { path: '/x' } }, 1),
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'x' } },
+          1,
+        ),
         toolResultRow({ callId: 'c1', output: 'file body' }, 2),
       ]),
     )
@@ -61,12 +79,11 @@ describe('normalize tool pairing', () => {
     const tools = toolParts(session)
     expect(tools).toHaveLength(1)
     expect(tools[0]?.id).toBe('c1')
-    expect(tools[0]?.name).toBe('read')
-    expect(tools[0]?.input).toEqual({ path: '/x' })
-    expect(tools[0]?.result).toEqual({
+    expect(tools[0]?.name).toBe('terminal')
+    expect(tools[0]?.input).toEqual({ command: 'x' })
+    expect(tools[0]?.result).toMatchObject({
       content: 'file body',
       isError: false,
-      details: undefined,
     })
   })
 
@@ -95,6 +112,25 @@ describe('normalize tool pairing', () => {
     })
   })
 
+  test('renders assistant text and its inline tool call in one turn', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'ls' } },
+          1,
+          'Let me list the files.',
+        ),
+      ]),
+    )
+
+    const message = session.messages[0]
+    expect(message?.parts[0]).toEqual({
+      kind: 'text',
+      text: 'Let me list the files.',
+    })
+    expect(message?.parts[1]).toMatchObject({ kind: 'tool', name: 'terminal' })
+  })
+
   test('marks a failed tool result as an error', () => {
     const session = normalize(
       jsonl([
@@ -116,23 +152,26 @@ describe('normalize tool pairing', () => {
     expect(session.messages).toHaveLength(0)
   })
 
-  test('defaults missing tool-call input to an empty object', () => {
+  test('defaults missing tool-call arguments to an empty object', () => {
     const session = normalize(
-      jsonl([toolCallRow({ callId: 'c1', name: 'todo' }, 1)]),
+      jsonl([toolCallRow({ callId: 'c1', name: 'skill_view' }, 1)]),
     )
     expect(toolParts(session)[0]?.input).toEqual({})
   })
 
-  test('drops a malformed tool envelope instead of leaking its raw JSON', () => {
-    const malformed = {
-      type: 'message',
-      role: 'tool',
-      content: JSON.stringify({ type: 'tool_result', output: 42 }),
-      createdAt: 1,
-    }
-    const session = normalize(jsonl([malformed]))
+  test('a tool row never emits a standalone message', () => {
+    const session = normalize(
+      jsonl([
+        {
+          type: 'message',
+          role: 'tool',
+          toolCallId: 'orphan',
+          content: 'not json at all',
+          createdAt: 1,
+        },
+      ]),
+    )
     expect(session.messages).toHaveLength(0)
-    expect(toolParts(session)).toHaveLength(0)
   })
 
   test('treats plain-text content as a message, not a tool', () => {
@@ -142,5 +181,16 @@ describe('normalize tool pairing', () => {
       kind: 'text',
       text: 'hello there',
     })
+  })
+
+  test('skips empty session_meta rows', () => {
+    const session = normalize(
+      jsonl([
+        { type: 'message', role: 'session_meta', content: '', createdAt: 1 },
+        textRow('user', 'real message', 2),
+      ]),
+    )
+    expect(session.messages).toHaveLength(1)
+    expect(session.messages[0]?.role).toBe('user')
   })
 })

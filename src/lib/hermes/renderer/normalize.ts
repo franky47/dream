@@ -6,39 +6,50 @@ import type {
   Part,
   Role,
   ToolPart,
+  ToolResult,
 } from '#lib/renderer/types'
 
 import { stripDiscordTriggerNote } from './discord.ts'
 import { extractFrontmatter, frontmatterToYaml } from './frontmatter.ts'
 import { isRewound } from './rewound.ts'
 
+// Hermes stores each assistant turn's tool invocations inline as a `tool_calls`
+// JSON array in the OpenAI function-call shape, and each tool's result as a
+// later `role='tool'` row keyed by `tool_call_id`. The schemas stay permissive:
+// a single odd entry should degrade to a missing field, never drop the row.
+const toolFunctionSchema = z.object({
+  name: z.string().optional(),
+  arguments: z.string().optional(),
+})
+
+const toolCallSchema = z.object({
+  id: z.string().optional(),
+  call_id: z.string().optional(),
+  type: z.string().optional(),
+  function: toolFunctionSchema.optional(),
+})
+
 const messageRowSchema = z.object({
   type: z.literal('message'),
   role: z.string(),
-  content: z.string(),
+  content: z.string().nullish(),
   createdAt: z.number(),
+  toolCalls: z.array(toolCallSchema).nullish(),
+  toolCallId: z.string().nullish(),
+  toolName: z.string().nullish(),
 })
 
-// Hermes wraps OpenAI Codex and stores each tool execution as its own message
-// row: a call row followed later by its result row. The two share a call id, so
-// the renderer pairs them into one tool part without reordering the transcript.
-const toolCallContentSchema = z.object({
-  type: z.literal('tool_call'),
-  callId: z.string(),
-  name: z.string(),
-  input: z.record(z.string(), z.unknown()).optional(),
-})
+type MessageRow = z.infer<typeof messageRowSchema>
 
-const toolResultContentSchema = z.object({
-  type: z.literal('tool_result'),
-  callId: z.string(),
-  output: z.string().optional(),
-  isError: z.boolean().optional(),
-  details: z.unknown().optional(),
-})
-
-type ToolCallContent = z.infer<typeof toolCallContentSchema>
-type ToolResultContent = z.infer<typeof toolResultContentSchema>
+// A tool result row carries a JSON object such as `{"output":"..."}` or
+// `{"success":true,...}`. Read `output` when present; otherwise keep the whole
+// object so nothing is lost. `success:false` marks the call as failed.
+const resultObjectSchema = z
+  .object({
+    output: z.string().optional(),
+    success: z.boolean().optional(),
+  })
+  .loose()
 
 function parseLines(jsonlText: string): unknown[] {
   const out: unknown[] = []
@@ -53,27 +64,46 @@ function parseLines(jsonlText: string): unknown[] {
   return out
 }
 
-function parseContentItem(content: string): unknown {
-  try {
-    return JSON.parse(content)
-  } catch {
-    return undefined
-  }
-}
-
 function toRole(role: string): Role {
   return role === 'user' ? 'user' : 'assistant'
 }
 
-const envelopeTypeSchema = z.object({
-  type: z.enum(['tool_call', 'tool_result']),
-})
+function parseArguments(fn: z.infer<typeof toolFunctionSchema> | undefined): {
+  [key: string]: unknown
+} {
+  if (fn?.arguments === undefined) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(fn.arguments)
+  } catch {
+    return {}
+  }
+  const record = z.record(z.string(), z.unknown()).safeParse(parsed)
+  return record.success ? record.data : {}
+}
 
-// A row that announces itself as a tool envelope but fails full validation is
-// dropped, never leaked as text: with the tool field keys modeled on Codex, a
-// mismatch should degrade to a missing tool row rather than raw JSON prose.
-function isToolEnvelope(item: unknown): boolean {
-  return envelopeTypeSchema.safeParse(item).success
+function toToolPart(call: z.infer<typeof toolCallSchema>): ToolPart | null {
+  const id = call.call_id ?? call.id
+  const name = call.function?.name
+  if (id === undefined || name === undefined) return null
+  return { kind: 'tool', id, name, input: parseArguments(call.function) }
+}
+
+function toToolResult(content: string): ToolResult {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(content)
+  } catch {
+    return { content, isError: false }
+  }
+  const object = resultObjectSchema.safeParse(parsed)
+  if (!object.success) return { content, isError: false }
+  const output = object.data.output ?? JSON.stringify(parsed)
+  return {
+    content: output,
+    isError: object.data.success === false,
+    details: parsed,
+  }
 }
 
 export function normalize(jsonlText: string): NormalizedSession {
@@ -82,77 +112,51 @@ export function normalize(jsonlText: string): NormalizedSession {
   return { frontmatterYaml, messages: normalizeMessages(raws) }
 }
 
-// Pairs Codex tool rows and folds text rows into an ordered message stream. The
-// fragment renderer feeds each context window through this same seam, so every
-// path shares one tool-pairing, Discord-stripping and rewound-skipping rule.
+// Folds Hermes message rows into an ordered stream. An assistant row becomes one
+// message carrying its text and any inline tool calls; a `role='tool'` row
+// attaches its result to the pending call by id. The fragment renderer feeds
+// each context window through this same seam, so every path shares one
+// tool-pairing, Discord-stripping and rewound-skipping rule.
 export function normalizeMessages(
   raws: readonly unknown[],
 ): NormalizedMessage[] {
   const messages: NormalizedMessage[] = []
   const pending = new Map<string, ToolPart>()
-  let currentAssistant: NormalizedMessage | null = null
 
-  const ensureAssistant = (timestampMs: number): NormalizedMessage => {
-    if (currentAssistant !== null) return currentAssistant
-    const m: NormalizedMessage = { role: 'assistant', timestampMs, parts: [] }
-    messages.push(m)
-    currentAssistant = m
-    return m
-  }
-
-  const addToolCall = (call: ToolCallContent, timestampMs: number): void => {
-    const part: ToolPart = {
-      kind: 'tool',
-      id: call.callId,
-      name: call.name,
-      input: call.input ?? {},
-    }
-    ensureAssistant(timestampMs).parts.push(part)
-    pending.set(call.callId, part)
-  }
-
-  const attachToolResult = (result: ToolResultContent): void => {
-    const part = pending.get(result.callId)
+  const attachResult = (row: MessageRow): void => {
+    if (row.toolCallId == null || row.content == null) return
+    const part = pending.get(row.toolCallId)
     if (part === undefined) return
-    part.result = {
-      content: result.output ?? '',
-      isError: result.isError ?? false,
-      details: result.details,
-    }
+    part.result = toToolResult(row.content)
   }
 
-  const addText = (role: Role, content: string, timestampMs: number): void => {
-    currentAssistant = null
-    const parts: Part[] =
-      content.length > 0 ? [{ kind: 'text', text: content }] : []
-    const m: NormalizedMessage = { role, timestampMs, parts }
-    messages.push(m)
-    if (role === 'assistant') currentAssistant = m
+  const addRow = (role: Role, row: MessageRow): void => {
+    const rawText = row.content ?? ''
+    const text = role === 'user' ? stripDiscordTriggerNote(rawText) : rawText
+    const parts: Part[] = []
+    if (text.length > 0) parts.push({ kind: 'text', text })
+    for (const call of row.toolCalls ?? []) {
+      const part = toToolPart(call)
+      if (part === null) continue
+      parts.push(part)
+      pending.set(part.id, part)
+    }
+    if (parts.length === 0) return
+    messages.push({ role, timestampMs: row.createdAt, parts })
   }
 
   for (const raw of raws) {
-    if (isRewound(raw)) continue
     const parsed = messageRowSchema.safeParse(raw)
     if (!parsed.success) continue
-    const { role, content, createdAt } = parsed.data
+    const row = parsed.data
+    if (row.role === 'session_meta') continue
+    if (isRewound(raw)) continue
 
-    const item = parseContentItem(content)
-    const call = toolCallContentSchema.safeParse(item)
-    if (call.success) {
-      addToolCall(call.data, createdAt)
+    if (row.role === 'tool') {
+      attachResult(row)
       continue
     }
-    const result = toolResultContentSchema.safeParse(item)
-    if (result.success) {
-      attachToolResult(result.data)
-      continue
-    }
-    if (isToolEnvelope(item)) continue
-
-    const normalizedRole = toRole(role)
-    const text =
-      normalizedRole === 'user' ? stripDiscordTriggerNote(content) : content
-    addText(normalizedRole, text, createdAt)
+    addRow(toRole(row.role), row)
   }
 
   return messages

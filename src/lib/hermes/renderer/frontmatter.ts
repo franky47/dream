@@ -89,7 +89,7 @@ export function extractFrontmatter(jsonlText: string): Frontmatter {
     }
     if (isRewound(raw)) continue
     const msg = messageRowSchema.safeParse(raw)
-    if (msg.success) messages.push(msg.data)
+    if (msg.success && msg.data.role !== 'session_meta') messages.push(msg.data)
   }
 
   const stamped = messages.filter((m) => Number.isFinite(m.createdAt))

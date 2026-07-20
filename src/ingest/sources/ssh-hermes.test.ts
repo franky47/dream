@@ -163,9 +163,9 @@ describe('runSshHermesPipeline', () => {
 
   test('renders a compacted session as numbered context-window fragments', async () => {
     const summary =
-      'Safety prefix the reader never sees.\n\n' +
-      '[hermes:compaction-summary]\nWe planned the refactor.\n' +
-      '[/hermes:compaction-summary]'
+      '[CONTEXT COMPACTION — REFERENCE ONLY] handoff, avoid repeating it:\n' +
+      'We planned the refactor.\n' +
+      '--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---'
     const fixturePath = path.join(workDir, 'fixture.jsonl')
     writeFileSync(
       fixturePath,
@@ -176,10 +176,9 @@ describe('runSshHermesPipeline', () => {
           type: 'message',
           id: 'm2',
           sessionId: 'ses_c',
-          turn: 2,
-          role: 'assistant',
+          role: 'user',
           content: summary,
-          activity: 'active',
+          active: 1,
           createdAt: DAY1_MS + 1_000,
         }),
         messageLine('m3', 'ses_c', DAY1_MS + 2_000),
@@ -200,13 +199,14 @@ describe('runSshHermesPipeline', () => {
     const two = readFileSync(path.join(bucket(DAY1), 'ses_c.2.md'), 'utf-8')
     expect(two).toContain('<compaction')
     expect(two).toContain('We planned the refactor.')
-    expect(two).not.toContain('Safety prefix')
+    expect(two).not.toContain('avoid repeating it')
   })
 
   test('joins a rotated chain into one root file with numbered fragments', async () => {
     const summary =
-      '[hermes:compaction-summary]\nWe planned the refactor.\n' +
-      '[/hermes:compaction-summary]'
+      '[CONTEXT COMPACTION — REFERENCE ONLY] handoff, avoid repeating it:\n' +
+      'We planned the refactor.\n' +
+      '--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---'
     const chained = (
       obj: Record<string, unknown>,
     ): Record<string, unknown> => ({ ...obj, logicalId: 'ses_root' })
@@ -325,9 +325,9 @@ describe('runSshHermesPipeline', () => {
 })
 
 describe('buildRemoteMemoryCmd', () => {
-  test('discovers only MEMORY.md and USER.md from the default hermes dir', () => {
+  test('discovers only MEMORY.md and USER.md from the default hermes memories dir', () => {
     const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
-    expect(cmd).toContain('cd $HOME/.hermes && ')
+    expect(cmd).toContain('cd $HOME/.hermes/memories && ')
     expect(cmd).toContain(`-name 'MEMORY.md'`)
     expect(cmd).toContain(`-name 'USER.md'`)
   })
@@ -358,7 +358,8 @@ describe('buildRemoteMemoryCmd', () => {
 
   test('leaves the default $HOME memory dir unquoted so the shell expands it', () => {
     const cmd = buildRemoteMemoryCmd({ sinceMs: 0 })
-    expect(cmd).not.toContain(`'$HOME/.hermes'`)
+    expect(cmd).toContain('cd $HOME/.hermes/memories && ')
+    expect(cmd).not.toContain(`'$HOME/.hermes/memories'`)
   })
 
   test('shell-quotes a custom memory dir', () => {

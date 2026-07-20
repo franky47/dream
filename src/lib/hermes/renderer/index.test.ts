@@ -59,14 +59,14 @@ describe('renderHermesSession', () => {
     expect(md).toContain('turns: 0')
   })
 
-  test('omits system prompt, model settings and reasoning from Markdown', () => {
+  test('omits system prompt, model config and reasoning from Markdown', () => {
     const md = renderHermesSession(
       jsonl([
         {
           ...SESSION,
           systemPrompt: 'You are Hermes, a secret system prompt.',
           model: 'llama-swap/big',
-          modelSettings: { temperature: 0.7, maxTokens: 4096 },
+          modelConfig: { maxTokens: 4096, maxIterations: 50 },
         },
         {
           type: 'message',
@@ -84,7 +84,7 @@ describe('renderHermesSession', () => {
     expect(md).toContain('The answer is 42.')
     expect(md).not.toContain('secret system prompt')
     expect(md).not.toContain('Chain of thought')
-    expect(md).not.toContain('temperature')
+    expect(md).not.toContain('maxIterations')
     expect(md).not.toContain('llama-swap/big')
   })
 
@@ -99,15 +99,15 @@ describe('renderHermesSession', () => {
           turn: 1,
           role: 'user',
           content:
-            'Sender: alice\n[Reply to Discord message 1417900000000000000 to respond.]\n\nWhat should I do?',
+            '[Triggering message id: `1528089646876065802` — use as `message_id` for reply/react/pin via the discord tools.]\n\n[François Best] What should I do?',
           createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
         },
       ]),
     )
 
-    expect(md).toContain('Sender: alice')
+    expect(md).toContain('[François Best]')
     expect(md).toContain('What should I do?')
-    expect(md).not.toContain('Discord message 1417900000000000000')
+    expect(md).not.toContain('Triggering message id')
   })
 
   test('lists all available platform IDs in frontmatter', () => {
@@ -330,25 +330,24 @@ describe('renderHermesSession', () => {
           sessionId: 'ses_1',
           turn: 1,
           role: 'assistant',
-          content: JSON.stringify({
-            type: 'tool_call',
-            callId: 'c1',
-            name: 'terminal',
-            input: { command: 'ls' },
-          }),
+          content: null,
+          toolCalls: [
+            {
+              id: 'c1',
+              call_id: 'c1',
+              type: 'function',
+              function: { name: 'terminal', arguments: '{"command":"ls"}' },
+            },
+          ],
           createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
         },
         {
           type: 'message',
           id: 'msg_2',
           sessionId: 'ses_1',
-          turn: 1,
           role: 'tool',
-          content: JSON.stringify({
-            type: 'tool_result',
-            callId: 'c1',
-            output: 'a\nb',
-          }),
+          toolCallId: 'c1',
+          content: JSON.stringify({ output: 'a\nb' }),
           createdAt: Date.UTC(2026, 4, 9, 12, 0, 30),
         },
       ]),
@@ -368,12 +367,18 @@ describe('renderHermesSession', () => {
           sessionId: 'ses_1',
           turn: 1,
           role: 'assistant',
-          content: JSON.stringify({
-            type: 'tool_call',
-            callId: 'c1',
-            name: 'browser',
-            input: { url: 'https://example.com' },
-          }),
+          content: null,
+          toolCalls: [
+            {
+              id: 'c1',
+              call_id: 'c1',
+              type: 'function',
+              function: {
+                name: 'browser',
+                arguments: '{"url":"https://example.com"}',
+              },
+            },
+          ],
           createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
         },
       ]),

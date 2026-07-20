@@ -15,7 +15,7 @@ const SOURCE = 'hermes'
 // where a leading `~` would stay literal but `$HOME` still expands to the
 // operator's home directory.
 const DEFAULT_REMOTE_DB_PATH = '$HOME/.hermes/state.db'
-const DEFAULT_REMOTE_MEMORY_DIR = '$HOME/.hermes'
+const DEFAULT_REMOTE_MEMORY_DIR = '$HOME/.hermes/memories'
 
 // Hermes keeps exactly two built-in memory files. Every other entry in the
 // memory directory (lock files, the state db, optional provider data) stays

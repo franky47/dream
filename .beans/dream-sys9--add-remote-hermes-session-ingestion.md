@@ -163,3 +163,15 @@ Echo currently stores built-in memory in `MEMORY.md` and `USER.md` alongside emp
 Hermes compaction does not persist a dedicated event flag. It archives prior rows, inserts a new live context, and identifies the summary through stable content markers. The source must derive context windows from those rows and markers.
 
 The first configured deployment target is `echo`, but the source must remain host-neutral.
+
+### Reconciled against live Echo schema
+
+The vertical was first built against a guessed schema, then reconciled with the real Echo `sessions`/`messages` DDL and data samples:
+
+- Sessions key platform identity in discrete columns (`user_id`, `session_key`, `chat_id`, `chat_type`, `thread_id`, `display_name`) plus a rich `origin_json` blob; the projection merges both into one `platform` object via `json_patch`. Usage lives in discrete token columns, gathered into a `usage` object. Real columns: `parent_session_id`, `started_at`/`ended_at` (REAL epoch seconds, ×1000 to ms), `model_config`. There is no `platform`/`usage`/`created_at`/`model_settings` column.
+- Messages carry nullable `content`, an OpenAI-shaped `tool_calls` JSON array on assistant rows, and `role='tool'` result rows keyed by `tool_call_id`; arguments are a JSON string. There is no `turn` or `metadata` column. `session_meta` rows (empty content) stay in JSONL but are excluded from Markdown.
+- Flag matrix: compaction archives rows as `active=0, compacted=1` (kept in earlier windows); a `/undo` is `active=0, compacted=0` (the only genuine rewind, dropped from Markdown).
+- The compaction summary is a live (`active=1`) user row whose content starts with `[CONTEXT COMPACTION — REFERENCE ONLY]`; cleaning strips through `avoid repeating it:` and the `--- END OF CONTEXT SUMMARY … ---` marker. The invented `[hermes:compaction-summary]` bracket markers and their historical/merged variants did not exist and were removed.
+- Discord user rows are framed only by a `[Triggering message id: … discord tools.]` line (stripped); the `[Name]` sender prefix is kept.
+- Bespoke tool renderers were reduced to the verified `terminal` (`{command, workdir, timeout}`) and `skill_view` (`{name, file_path}`); the invented read/write/patch/search/todo/clarify renderers were dropped, so unverified tools now use the compact fallback.
+- Remote memory directory corrected to `$HOME/.hermes/memories`.
