@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import {
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -446,6 +447,45 @@ describe('runSshHermesPipeline', () => {
 
     expect(result).toBeInstanceOf(Error)
     expect(listFiles(dataDir)).toEqual([])
+  })
+
+  test('reports SshSourceFailure, not the row error, when the transport dies mid-row', async () => {
+    // The stream ends on a truncated JSON line and the transport exits non-zero.
+    // The splitter's row error is the symptom; the transport failure is the
+    // cause and must be the one surfaced.
+    const result = await runSshHermesPipeline({
+      upstream: [
+        'sh',
+        '-c',
+        `printf '{"type":"session","sessionId":"ses_a","latestMess'; exit 1`,
+      ],
+      dataDir,
+      host: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    if (!(result instanceof Error)) throw new Error('unreachable')
+    expect(result.message).toContain('host=echo')
+    expect(result.message).toContain('ssh=1')
+    // The truncated-row error rides along as the cause rather than masking the
+    // transport failure.
+    expect(result.cause).toBeInstanceOf(Error)
+    expect(listFiles(dataDir)).toEqual([])
+  })
+
+  test('kills the ssh child when the splitter fails on a still-open stream', async () => {
+    // The stream opens with a malformed row while the transport keeps running.
+    // Without a kill the child would block on a full pipe (here: reach its
+    // post-sleep side effect); the marker proves the child was terminated.
+    const marker = path.join(workDir, 'not-killed-marker')
+    const result = await runSshHermesPipeline({
+      upstream: ['sh', '-c', `printf 'garbage\\n'; sleep 2; touch ${marker}`],
+      dataDir,
+      host: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    expect(existsSync(marker)).toBe(false)
   })
 })
 

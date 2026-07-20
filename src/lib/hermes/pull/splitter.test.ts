@@ -259,6 +259,48 @@ describe('splitJsonlToSessionFiles', () => {
     expect(result.message).toContain('unsafe session id')
   })
 
+  test('rejects a logical key that reappears after another session', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_a',
+        sessionId: 'ses_a',
+        latestMessageTime: DAY1_MS,
+      }),
+      messageLine({ id: 'm_a', sessionId: 'ses_a' }),
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_b',
+        sessionId: 'ses_b',
+        latestMessageTime: DAY2_MS,
+      }),
+      // ses_a reappears after ses_b: staging it again would clobber the first
+      // ses_a file at commit, so the stream is rejected.
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_a',
+        sessionId: 'ses_a',
+        latestMessageTime: DAY1_MS,
+      }),
+    ]
+    const result = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    if (!(result instanceof Error)) throw new Error('unreachable')
+    expect(result.message).toContain('hermes/echo')
+    expect(result.message).toContain('reappears')
+    // The error is a tagged errore error carrying the machine, like
+    // SshSourceFailure, rather than a bare Error.
+    expect('_tag' in result).toBe(true)
+    if ('_tag' in result) expect(result._tag).toBe('HermesRowInvalid')
+    expect('machine' in result).toBe(true)
+    if ('machine' in result) expect(result.machine).toBe('echo')
+  })
+
   test('stages files and writes none until commit is called', async () => {
     const lines = [
       JSON.stringify({

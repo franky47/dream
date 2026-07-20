@@ -39,6 +39,21 @@ function errorAttr(tool: ToolPart): string {
   return tool.result?.isError === true ? ' error="1"' : ''
 }
 
+// A call whose result never arrived (a paired result dropped at a window
+// boundary, or a session that ended before the tool returned) is marked so a
+// reader can tell "no output" from "output lost". A resolved call always carries
+// a `result`, so this marks only the genuinely unpaired ones.
+function missingResultAttr(tool: ToolPart): string {
+  return tool.result === undefined ? ' result="missing"' : ''
+}
+
+// The trailing status attributes shared by every tool head: an error marker and,
+// when a call has no paired result at all, a `result="missing"` marker. The two
+// are mutually exclusive — an error implies a result arrived.
+function statusAttrs(tool: ToolPart): string {
+  return `${missingResultAttr(tool)}${errorAttr(tool)}`
+}
+
 function blockOrSelfClosing(head: string, body: string): string {
   if (body.length === 0) return `${head}/>`
   return `${head}>\n${body}\n</tool>`
@@ -77,7 +92,7 @@ function collectFallbackInputs(input: Record<string, unknown>): FallbackInputs {
 // instead of injected as raw markup.
 export const hermesFallback: ToolRenderer<void> = (tool: ToolPart): string => {
   const { attrs, unsafe } = collectFallbackInputs(tool.input)
-  const head = `<tool name="${escapeAttr(tool.name)}"${attrs}${errorAttr(tool)}`
+  const head = `<tool name="${escapeAttr(tool.name)}"${attrs}${statusAttrs(tool)}`
   const body = unsafe
     .map(([key, value]) => `${escapeText(key)}: ${escapeText(value)}`)
     .join('\n')
@@ -106,7 +121,7 @@ const renderTerminal: ToolRenderer<void> = (tool) => {
   const workdir = attr('workdir', asString(tool.input.workdir))
   const head = `<tool name="terminal"${command}${workdir}${terminalExitAttr(
     tool,
-  )}${errorAttr(tool)}`
+  )}${statusAttrs(tool)}`
   // Command output is attacker-influenced (filenames, fetched web text), so
   // escape it: a raw `</tool>` in stdout would otherwise forge later turns.
   const body = tool.result === undefined ? '' : escapeText(tool.result.content)
@@ -119,7 +134,7 @@ const renderTerminal: ToolRenderer<void> = (tool) => {
 const renderSkillView: ToolRenderer<void> = (tool) => {
   const name = attr('skill', asString(tool.input.name))
   const file = attr('file', asString(tool.input.file_path))
-  return `<tool name="skill_view"${name}${file}${errorAttr(tool)}/>`
+  return `<tool name="skill_view"${name}${file}${statusAttrs(tool)}/>`
 }
 
 // `read_file` reads a slice of a file; its input is `{path, offset?, limit?}` and
@@ -129,7 +144,7 @@ const renderReadFile: ToolRenderer<void> = (tool) => {
   const path = attr('path', asString(tool.input.path))
   const offset = numAttr('offset', tool.input.offset)
   const limit = numAttr('limit', tool.input.limit)
-  return `<tool name="read_file"${path}${offset}${limit}${errorAttr(tool)}/>`
+  return `<tool name="read_file"${path}${offset}${limit}${statusAttrs(tool)}/>`
 }
 
 const writeResultSchema = z
@@ -148,7 +163,7 @@ const renderWriteFile: ToolRenderer<void> = (tool) => {
   const bytes = parsed.success ? parsed.data.bytes_written : undefined
   const path = attr('path', resolved ?? asString(tool.input.path))
   const bytesAttr = bytes === undefined ? '' : ` bytes="${String(bytes)}"`
-  return `<tool name="write_file"${path}${bytesAttr}${errorAttr(tool)}/>`
+  return `<tool name="write_file"${path}${bytesAttr}${statusAttrs(tool)}/>`
 }
 
 // `patch` edits a file in place; its input is `{mode, path?, new_string, ...}`
@@ -157,7 +172,7 @@ const renderWriteFile: ToolRenderer<void> = (tool) => {
 const renderPatch: ToolRenderer<void> = (tool) => {
   const mode = attr('mode', asString(tool.input.mode))
   const path = attr('path', asString(tool.input.path))
-  return `<tool name="patch"${mode}${path}${errorAttr(tool)}/>`
+  return `<tool name="patch"${mode}${path}${statusAttrs(tool)}/>`
 }
 
 const searchResultSchema = z
@@ -173,22 +188,21 @@ const renderSearchFiles: ToolRenderer<void> = (tool) => {
   const parsed = searchResultSchema.safeParse(tool.result?.details)
   const total = parsed.success ? parsed.data.total_count : undefined
   const matches = total === undefined ? '' : ` matches="${String(total)}"`
-  return `<tool name="search_files"${pattern}${path}${matches}${errorAttr(
+  return `<tool name="search_files"${pattern}${path}${matches}${statusAttrs(
     tool,
   )}/>`
 }
 
-const todoInputSchema = z
+// Each todo item is re-parsed on its own, so one malformed entry drops only that
+// task instead of erasing the whole rendered list.
+const todoItemSchema = z
   .object({
-    todos: z
-      .array(
-        z.object({
-          content: z.string().optional(),
-          status: z.string().optional(),
-        }),
-      )
-      .optional(),
+    content: z.string().optional(),
+    status: z.string().optional(),
   })
+  .loose()
+const todoInputSchema = z
+  .object({ todos: z.array(z.unknown()).optional() })
   .loose()
 
 // `todo` sets the working task list; its input is `{todos:[{content, status?}]}`.
@@ -196,11 +210,14 @@ const todoInputSchema = z
 const renderTodo: ToolRenderer<void> = (tool) => {
   const parsed = todoInputSchema.safeParse(tool.input)
   const todos = parsed.success ? (parsed.data.todos ?? []) : []
-  const head = `<tool name="todo"${errorAttr(tool)}`
+  const head = `<tool name="todo"${statusAttrs(tool)}`
   const body = todos
-    .map((todo) => {
-      const status = todo.status === undefined ? '' : `[${todo.status}] `
-      return `${status}${todo.content ?? ''}`
+    .map((raw) => todoItemSchema.safeParse(raw))
+    .filter((item) => item.success)
+    .map((item) => {
+      const status =
+        item.data.status === undefined ? '' : `[${item.data.status}] `
+      return `${status}${item.data.content ?? ''}`
     })
     .filter((line) => line.length > 0)
     .map(escapeText)
@@ -208,15 +225,21 @@ const renderTodo: ToolRenderer<void> = (tool) => {
   return blockOrSelfClosing(head, body)
 }
 
+// `choices` holds unknown elements so one non-string entry drops only itself
+// rather than erasing the whole choice list.
 const clarifyInputSchema = z
   .object({
     question: z.string().optional(),
-    choices: z.array(z.string()).optional(),
+    choices: z.array(z.unknown()).optional(),
   })
   .loose()
 const clarifyResultSchema = z
   .object({ question: z.string().optional() })
   .loose()
+
+function isString(v: unknown): v is string {
+  return typeof v === 'string'
+}
 
 // `clarify` asks the human to choose; its input is `{question?, choices}` and its
 // result echoes `{question, choices_offered}`. The renderer shows the question
@@ -229,10 +252,13 @@ const renderClarify: ToolRenderer<void> = (tool) => {
     (input.success ? input.data.question : undefined) ??
     ''
   const choices = input.success ? (input.data.choices ?? []) : []
-  const head = `<tool name="clarify"${attr('question', question)}${errorAttr(
+  const head = `<tool name="clarify"${attr('question', question)}${statusAttrs(
     tool,
   )}`
-  const body = choices.map((choice) => `- ${escapeText(choice)}`).join('\n')
+  const body = choices
+    .filter(isString)
+    .map((choice) => `- ${escapeText(choice)}`)
+    .join('\n')
   return blockOrSelfClosing(head, body)
 }
 

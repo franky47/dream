@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { COMPACTION_SUMMARY_PREFIX } from '#lib/hermes/compaction'
 import { renderConversation } from '#lib/renderer/render'
 import type { NormalizedMessage } from '#lib/renderer/types'
 
@@ -7,6 +8,7 @@ import {
   type Frontmatter,
   frontmatterToYaml,
   scalarPlatformFields,
+  sessionRowSchema,
 } from './frontmatter.ts'
 import { normalizeMessages } from './normalize.ts'
 import { isRewound } from './rewound.ts'
@@ -16,22 +18,12 @@ const RENDERER_VERSION = 'hermes-md@1'
 
 // Hermes marks a compaction summary with a fixed instruction prefix and a fixed
 // end marker, both wrapping the real Markdown summary body. Detection keys on
-// the opening literal; cleaning drops everything through the instruction's final
-// `avoid repeating it:` phrase and the trailing end-marker line, leaving only
-// the summary the model was handed.
-const DETECTION_TOKEN = '[CONTEXT COMPACTION — REFERENCE ONLY]'
+// the shared opening marker; cleaning drops everything through the instruction's
+// final `avoid repeating it:` phrase and the trailing end-marker line, leaving
+// only the summary the model was handed.
 const INSTRUCTION_END = 'avoid repeating it:'
 const END_MARKER =
   '--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---'
-
-const sessionRowSchema = z.object({
-  type: z.literal('session'),
-  sessionId: z.string(),
-  source: z.string().nullable().optional(),
-  title: z.string().nullable().optional(),
-  platform: z.unknown().optional(),
-  archived: z.number().nullable().optional(),
-})
 
 // Permissive on role and content so tool-result rows (role "tool", whose content
 // is null when the payload lives elsewhere) and every other message row survive
@@ -48,8 +40,9 @@ type MessageRow = z.infer<typeof messageRowSchema>
 
 // A joined logical session carries several physical session headers. Frontmatter
 // describes the joined whole, not the first physical row: it keeps the root's
-// id/source/title, folds the platform IDs of every member (root first, later
-// members only fill gaps), and marks the whole archived if any member is.
+// id, takes the first non-empty source and title in chain order, folds the
+// platform IDs of every member (root first, later members only fill gaps), and
+// marks the whole archived if any member is.
 interface MergedSession {
   sessionId: string
   source: string
@@ -92,17 +85,19 @@ function parseRows(jsonlText: string): unknown[] {
 }
 
 function isCompactionSummary(content: string | null | undefined): boolean {
-  return typeof content === 'string' && content.startsWith(DETECTION_TOKEN)
+  return (
+    typeof content === 'string' && content.startsWith(COMPACTION_SUMMARY_PREFIX)
+  )
 }
 
 // Keep only the Markdown summary body: drop the instruction prefix through its
-// closing `avoid repeating it:` phrase (falling back to just the detection token
+// closing `avoid repeating it:` phrase (falling back to just the detection marker
 // when Hermes changes the wording), then drop the trailing end-marker line.
 function cleanSummaryBody(content: string): string {
   const instructionAt = content.indexOf(INSTRUCTION_END)
   const start =
     instructionAt === -1
-      ? DETECTION_TOKEN.length
+      ? COMPACTION_SUMMARY_PREFIX.length
       : instructionAt + INSTRUCTION_END.length
   const endAt = content.indexOf(END_MARKER)
   const body = endAt === -1 ? content.slice(start) : content.slice(start, endAt)
@@ -120,10 +115,12 @@ function collapseBlankLines(text: string): string {
 
 // The compaction block is the first turn of its window: it takes turn number 1
 // and the window's relative-time origin (t="0"), so the body turns that follow
-// it number from 2 and clock from the summary's timestamp.
+// it number from 2 and clock from the summary's timestamp. Detection already
+// requires the marker on a user row, so the role is a fixed `user` rather than an
+// interpolated field that could break out of the attribute.
 function renderCompactionBlock(summary: MessageRow): string {
   const body = cleanSummaryBody(summary.content ?? '')
-  return `<compaction n="1" role="${summary.role}" t="0">\n${body}\n</compaction>`
+  return `<compaction n="1" role="user" t="0">\n${body}\n</compaction>`
 }
 
 function renderWindowBody(spec: WindowSpec): string {
@@ -233,7 +230,7 @@ function mergeSessions(raws: readonly unknown[]): MergedSession | null {
 }
 
 // Live message rows in order, each tagged with whether it opens a context
-// window. Rewound rows (`active=0, compacted=0`) and empty `session_meta` rows
+// window. Rewound rows (`active=0, compacted=0`) and `session_meta` rows
 // never enter the stream, so they cannot start a window or skew a window's
 // counts or time bounds. Compaction-archived rows (`active=0, compacted=1`)
 // stay, so they render in their earlier window.

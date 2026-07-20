@@ -384,6 +384,8 @@ describe('renderHermesSession', () => {
       ]),
     )
 
-    expect(md).toContain('<tool name="browser" url="https://example.com"/>')
+    expect(md).toContain(
+      '<tool name="browser" url="https://example.com" result="missing"/>',
+    )
   })
 })

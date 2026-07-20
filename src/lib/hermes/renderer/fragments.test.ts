@@ -462,6 +462,27 @@ describe('renderHermesFragments message pipeline', () => {
     expect(two?.markdown).toContain('Live reply that stays.')
     expect(two?.markdown).not.toContain('Withdrawn reply that must vanish.')
   })
+
+  test('marks a call whose result lands past the compaction boundary as result="missing"', () => {
+    const [one, two] = renderHermesFragments(
+      jsonl([
+        SESSION,
+        msg('m1', 'user', 'run ls', min(0)),
+        toolCallRow('tc1', 'c1', 'terminal', { command: 'ls' }, min(1)),
+        msg('s1', 'user', SUMMARY_CONTENT, min(2)),
+        toolResultRow('tr1', 'c1', 'leaked file body', min(3)),
+        msg('m2', 'user', 'Carry on', min(4)),
+      ]),
+    )
+
+    // The call sits in the archived window; its result row lands in the next
+    // window, so the call is shown as missing rather than a clean success.
+    expect(one?.markdown).toContain(
+      '<tool name="terminal" command="ls" result="missing"/>',
+    )
+    // The orphaned result never renders, so its body cannot leak.
+    expect(two?.markdown).not.toContain('leaked file body')
+  })
 })
 
 describe('renderHermesFragments mixed rotation and in-place', () => {
@@ -586,6 +607,45 @@ describe('renderHermesFragments with several compactions', () => {
     expect(one?.markdown).toContain('turns: 1')
     expect(two?.markdown).toContain('turns: 2')
     expect(three?.markdown).toContain('turns: 2')
+  })
+
+  test('a compaction summary as the final row renders a summary-only last window', () => {
+    const fragments = renderHermesFragments(
+      jsonl([
+        SESSION,
+        msg('m1', 'user', 'Please refactor the parser', min(0)),
+        msg('m2', 'assistant', 'Here is the plan.', min(1)),
+        msg('s1', 'user', summary(FIRST_SUMMARY_BODY), min(2)),
+      ]),
+    )
+
+    expect(fragments.map((f) => f.contextWindow)).toEqual([1, 2])
+    const [one, two] = fragments
+    expect(one?.markdown).toContain('Please refactor the parser')
+    expect(two?.markdown).toContain('<compaction')
+    expect(two?.markdown).toContain(FIRST_SUMMARY_BODY)
+    expect(two?.markdown).not.toContain('nextContextWindow')
+  })
+
+  test('two adjacent summaries yield an empty middle window that still renders', () => {
+    const fragments = renderHermesFragments(
+      jsonl([
+        SESSION,
+        msg('m1', 'user', 'Start', min(0)),
+        msg('s1', 'user', summary(FIRST_SUMMARY_BODY), min(1)),
+        msg('s2', 'user', summary(SECOND_SUMMARY_BODY), min(2)),
+        msg('m2', 'user', 'End', min(3)),
+      ]),
+    )
+
+    expect(fragments.map((f) => f.contextWindow)).toEqual([1, 2, 3])
+    const [, two, three] = fragments
+    // The middle window opens with the first summary and carries no body turns.
+    expect(two?.markdown).toContain('<compaction')
+    expect(two?.markdown).toContain(FIRST_SUMMARY_BODY)
+    expect(two?.markdown).toContain('nextContextWindow: 3')
+    expect(three?.markdown).toContain(SECOND_SUMMARY_BODY)
+    expect(three?.markdown).toContain('End')
   })
 })
 

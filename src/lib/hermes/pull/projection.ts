@@ -1,5 +1,7 @@
 import type { Database } from 'bun:sqlite'
 
+import { COMPACTION_SUMMARY_PREFIX } from '#lib/hermes/compaction'
+
 // Hermes keeps its live transcripts in a SQLite state database rather than one
 // file per session. This projection flattens the eligible rows into the same
 // per-line JSONL shape the splitter and renderer consume, so remote reads over
@@ -44,11 +46,9 @@ const BACKGROUND_SOURCES = ['cron', 'webhook', 'subagent'] as const
 // message is the compaction summary Hermes carried across the rotation. That
 // opening marker plus a `parent_session_id` is what separates a continuation
 // from a user-created branch (whose first message is an ordinary turn) and from
-// a subagent (already dropped by source). Hermes writes the marker as the exact
-// literal prefix below; the CTE matches it with a fixed-length `substr` prefix
-// comparison, which sidesteps LIKE's `%`/`_` metacharacters and the special
-// characters (the em dash) the literal carries.
-const COMPACTION_SUMMARY_PREFIX = '[CONTEXT COMPACTION — REFERENCE ONLY]'
+// a subagent (already dropped by source). The CTE matches the shared marker with
+// a fixed-length `substr` prefix comparison, which sidesteps LIKE's `%`/`_`
+// metacharacters.
 const COMPACTION_SUMMARY_PREFIX_LEN = COMPACTION_SUMMARY_PREFIX.length
 
 function backgroundSourceList(): string {

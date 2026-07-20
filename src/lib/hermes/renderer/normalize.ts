@@ -34,7 +34,10 @@ const messageRowSchema = z.object({
   role: z.string(),
   content: z.string().nullish(),
   createdAt: z.number(),
-  toolCalls: z.array(toolCallSchema).nullish(),
+  // Each element is re-parsed with `toolCallSchema` in `addRow`, so a single
+  // malformed entry degrades to a missing call rather than failing the whole
+  // array and dropping the assistant row (including its text) with it.
+  toolCalls: z.array(z.unknown()).nullish(),
   toolCallId: z.string().nullish(),
   toolName: z.string().nullish(),
   apiContent: z.string().nullish(),
@@ -46,13 +49,15 @@ type MessageRow = z.infer<typeof messageRowSchema>
 // `{output, exit_code, error}` (extra keys such as `approval` may ride along);
 // other tools store their own scalar keys. Read `output` when present; otherwise
 // keep the whole object so nothing is lost. A run failed when its `exit_code` is
-// non-zero or its `error` field is non-null — the old `success:false` flag never
-// appears on real rows.
+// non-zero or its `error` field is truthy (a non-empty error string or an error
+// object) — the old `success:false` flag never appears on real rows. `exit_code`
+// is coerced so a stringified code still reads as a number, and `error` stays
+// `unknown` so an object-shaped failure is not dropped as a schema mismatch.
 const resultObjectSchema = z
   .object({
     output: z.string().optional(),
-    exit_code: z.number().optional(),
-    error: z.string().nullish(),
+    exit_code: z.coerce.number().optional(),
+    error: z.unknown().optional(),
   })
   .loose()
 
@@ -69,8 +74,13 @@ function parseLines(jsonlText: string): unknown[] {
   return out
 }
 
-function toRole(role: string): Role {
-  return role === 'user' ? 'user' : 'assistant'
+// Only the two conversational roles render as turns. An unknown role (a
+// `system` row, say) is skipped rather than silently coerced to `assistant`,
+// which would mislabel it.
+function toRole(role: string): Role | null {
+  if (role === 'user') return 'user'
+  if (role === 'assistant') return 'assistant'
+  return null
 }
 
 function parseArguments(fn: z.infer<typeof toolFunctionSchema> | undefined): {
@@ -96,8 +106,9 @@ function toToolPart(call: z.infer<typeof toolCallSchema>): ToolPart | null {
 
 function isResultFailure(data: z.infer<typeof resultObjectSchema>): boolean {
   const failedExit = data.exit_code !== undefined && data.exit_code !== 0
-  // A real success row carries `error: null`; an empty string is not a failure.
-  const hasError = data.error != null && data.error.length > 0
+  // A real success row carries `error: null` or an empty string, both falsy; a
+  // non-empty error string or an error object is a failure.
+  const hasError = Boolean(data.error)
   return failedExit || hasError
 }
 
@@ -106,7 +117,11 @@ function toToolResult(content: string): ToolResult {
   try {
     parsed = JSON.parse(content)
   } catch {
-    return { content, isError: false }
+    // Empty output is "no output", not a failure. A non-empty payload that is
+    // not the JSON success envelope has an unknown status, so surface it as a
+    // non-success rather than letting a failure such as `Error: timed out`
+    // render as a clean success.
+    return { content, isError: content.trim().length > 0 }
   }
   const object = resultObjectSchema.safeParse(parsed)
   if (!object.success) return { content, isError: false }
@@ -167,8 +182,10 @@ export function normalizeMessages(
     const text = role === 'user' ? stripDiscordTriggerNote(rawText) : rawText
     const parts: Part[] = []
     if (text.length > 0) parts.push({ kind: 'text', text })
-    for (const call of row.toolCalls ?? []) {
-      const part = toToolPart(call)
+    for (const rawCall of row.toolCalls ?? []) {
+      const parsedCall = toolCallSchema.safeParse(rawCall)
+      if (!parsedCall.success) continue
+      const part = toToolPart(parsedCall.data)
       if (part === null) continue
       parts.push(part)
       pending.set(part.id, part)
@@ -188,7 +205,9 @@ export function normalizeMessages(
       attachResult(row)
       continue
     }
-    addRow(toRole(row.role), row)
+    const role = toRole(row.role)
+    if (role === null) continue
+    addRow(role, row)
   }
 
   return messages

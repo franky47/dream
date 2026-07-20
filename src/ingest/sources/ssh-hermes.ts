@@ -11,9 +11,12 @@ import { utcDay } from '#lib/utc-day'
 import type { Source } from '#src/ingest/orchestrator'
 
 const SOURCE = 'hermes'
-// `$HOME` (not `~`): the whole command is single-quoted for the remote shell,
-// where a leading `~` would stay literal but `$HOME` still expands to the
-// operator's home directory.
+// The command reaches ssh as a single argv string and runs in the remote login
+// shell. `quoteRemotePath` leaves this default unquoted, so `$HOME` expands
+// there; a bare `~` would expand too, so `$HOME` is a style choice, not a
+// correctness one. The real quoting hazard is the caller-supplied branch, which
+// `quoteRemotePath` single-quotes: inside single quotes neither `~` nor `$HOME`
+// expands, so a custom path must be a literal absolute path.
 const DEFAULT_REMOTE_DB_PATH = '$HOME/.hermes/state.db'
 const DEFAULT_REMOTE_MEMORY_DIR = '$HOME/.hermes/memories'
 
@@ -184,18 +187,26 @@ export async function runSshHermesPipeline(opts: {
     })
   }
 
-  const splitterPromise = splitJsonlToSessionFiles({
+  const splitOutcome = await splitJsonlToSessionFiles({
     lines: streamToLines(stdout),
     dataDir: opts.dataDir,
     machine: opts.host,
-  })
+  }).catch(
+    (e: unknown): Error => (e instanceof Error ? e : new Error(String(e))),
+  )
 
-  const [splitResult, sshExit, sshStderr] = await Promise.all([
-    splitterPromise,
+  // A failed split stops draining stdout, so a still-healthy ssh child would
+  // block on a full pipe forever. Kill it before awaiting its exit.
+  if (splitOutcome instanceof Error) proc.kill()
+
+  const [sshExit, sshStderr] = await Promise.all([
     proc.exited,
     readAll(proc.stderr),
   ])
 
+  // A transport failure is the root cause and outranks a splitter error, which
+  // over a dropped stream is only the symptom (a truncated final row). Report
+  // the transport failure first, carrying the splitter error as its cause.
   if (sshExit !== 0) {
     const stderr = sshStderr.trim().slice(0, 500) || '(no stderr captured)'
     throw new SshSourceFailure({
@@ -204,13 +215,18 @@ export async function runSshHermesPipeline(opts: {
       host: opts.host,
       sshExit,
       stderr,
+      cause: splitOutcome instanceof Error ? splitOutcome : undefined,
     })
   }
+
+  // The transport exited clean, so a splitter error is a genuine malformed row
+  // rather than a dropped stream: surface it as-is.
+  if (splitOutcome instanceof Error) throw splitOutcome
 
   // The stream drained and SSH exited clean, so the staged sessions are whole;
   // only now do the final `.jsonl` files land on disk. A dropped transport
   // leaves the staging in memory untouched and nothing partial behind.
-  const { sessionPaths, commit, ...metrics } = splitResult
+  const { sessionPaths, commit, ...metrics } = splitOutcome
   await commit()
   for (const jsonlPath of sessionPaths) {
     const jsonlText = await Bun.file(jsonlPath).text()
@@ -234,8 +250,11 @@ class SshMemoryFailure extends errore.createTaggedError({
 
 // Extracts the ssh+tar stream into a temp dir, then keeps only the two built-in
 // memory files whose mtime falls inside the half-open [since, until) window and
-// copies each byte-for-byte into its modification day's `memories` bucket. This
-// mirrors the session projection's window bound and Codex's memory routing. The
+// copies each byte-for-byte into its modification day's `memories` bucket.
+//
+// The window is half-open `[since, until)`, the same bound the session
+// projection applies. Routing each memory file into its own modification-day
+// bucket follows the same rule the Codex source uses for its memories. The
 // remote `find` can only express the lower bound, so the strict `< until` upper
 // bound is enforced here.
 export async function runSshHermesMemoryPipeline(opts: {
@@ -252,11 +271,30 @@ export async function runSshHermesMemoryPipeline(opts: {
       stderr: 'pipe',
       stdin: 'ignore',
     })
-    const tar = Bun.spawn(['tar', '-xzf', '-', '-C', stageDir], {
-      stdin: ssh.stdout,
-      stdout: 'pipe',
-      stderr: 'pipe',
+    // Spawning tar can throw (e.g. tar missing from PATH). The ssh child is
+    // already running, so kill it before propagating to avoid leaking it.
+    const tar = errore.try({
+      try: () =>
+        Bun.spawn(['tar', '-xzf', '-', '-C', stageDir], {
+          stdin: ssh.stdout,
+          stdout: 'pipe',
+          stderr: 'pipe',
+        }),
+      catch: (e) =>
+        new SshMemoryFailure({
+          machine: opts.host,
+          source: SOURCE,
+          host: opts.host,
+          sshExit: -1,
+          tarExit: -1,
+          stderr: 'tar spawn failed',
+          cause: e,
+        }),
     })
+    if (tar instanceof Error) {
+      ssh.kill()
+      throw tar
+    }
 
     const [sshExit, tarExit, sshStderr, tarStderr] = await Promise.all([
       ssh.exited,

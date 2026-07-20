@@ -5,12 +5,12 @@ import { isRewound } from './rewound.ts'
 const RENDERER_VERSION = 'hermes-md@1'
 
 // Platform origin travels as a nested object on the session row. Keep the parse
-// permissive: read whatever scalar fields a platform provides (channel, thread,
-// guild, author IDs and their human-readable labels) and ignore nested shapes,
-// so one odd field never drops the whole block.
+// permissive: read whatever scalar fields a platform provides (user_id,
+// session_key, chat_id, chat_type, thread_id and the display_name label) and
+// ignore nested shapes, so one odd field never drops the whole block.
 const platformFieldSchema = z.union([z.string(), z.number(), z.boolean()])
 
-const sessionRowSchema = z.object({
+export const sessionRowSchema = z.object({
   type: z.literal('session'),
   sessionId: z.string(),
   source: z.string().nullable().optional(),
@@ -113,17 +113,48 @@ export function extractFrontmatter(jsonlText: string): Frontmatter {
   }
 }
 
+// A newline or other control character is rejected as a regex literal by
+// oxlint's no-control-regex, so the class is built from char codes: the C0
+// control range plus DEL. A double-quoted YAML scalar must keep them on one
+// line, so each control char becomes a YAML escape (`\n`, `\r`, `\t`, or `\xNN`).
+const CONTROL_CHARS = new RegExp(
+  `[${String.fromCharCode(0)}-${String.fromCharCode(0x1f)}${String.fromCharCode(0x7f)}]`,
+  'g',
+)
+
+function controlEscape(ch: string): string {
+  const code = ch.charCodeAt(0)
+  if (code === 10) return '\\n'
+  if (code === 13) return '\\r'
+  if (code === 9) return '\\t'
+  return `\\x${code.toString(16).padStart(2, '0')}`
+}
+
 function yamlEscapeString(s: string): string {
-  return `"${s.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
+  const escaped = s
+    .replaceAll('\\', '\\\\')
+    .replaceAll('"', '\\"')
+    .replaceAll(CONTROL_CHARS, controlEscape)
+  return `"${escaped}"`
 }
 
 function yamlScalar(value: PlatformField): string {
   return typeof value === 'string' ? yamlEscapeString(value) : String(value)
 }
 
+// A session id normally reads as a bare YAML scalar (a `ses_…` slug or UUID),
+// which the tests and downstream tools expect unquoted. A hostile id that breaks
+// that safe shape is quoted and escaped so it cannot corrupt the frontmatter
+// block.
+const SAFE_YAML_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+function yamlSessionId(id: string): string {
+  return SAFE_YAML_ID.test(id) ? id : yamlEscapeString(id)
+}
+
 export function frontmatterToYaml(fm: Frontmatter): string {
   const lines: string[] = ['---']
-  lines.push(`sessionId: ${fm.sessionId}`)
+  lines.push(`sessionId: ${yamlSessionId(fm.sessionId)}`)
   lines.push(`source: ${yamlEscapeString(fm.source)}`)
   lines.push(`title: ${yamlEscapeString(fm.title)}`)
   // Only archived sessions carry the flag; its absence means "not archived", so

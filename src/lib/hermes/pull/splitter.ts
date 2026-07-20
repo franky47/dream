@@ -66,28 +66,44 @@ function logicalKey(env: { sessionId: string; logicalId?: string }): string {
   return env.logicalId ?? env.sessionId
 }
 
-class HermesRowInvalid extends Error {
-  override name = 'HermesRowInvalid'
-}
+// A tagged error carrying the source machine and a human-readable detail, so a
+// malformed row fails loudly with machine and context, matching `SshSourceFailure`.
+class HermesRowInvalid extends errore.createTaggedError({
+  name: 'HermesRowInvalid',
+  message: 'hermes/$machine: $detail',
+}) {}
 
 function assertSafeSegment(key: string, machine: string): void {
   if (key.length === 0 || key.includes('..') || !SAFE_SEGMENT.test(key)) {
-    throw new HermesRowInvalid(
-      `hermes/${machine}: unsafe session id ${JSON.stringify(key)}`,
-    )
+    throw new HermesRowInvalid({
+      machine,
+      detail: `unsafe session id ${JSON.stringify(key)}`,
+    })
   }
 }
 
-function parseLine<T>(schema: z.ZodType<T>, line: string, context: string): T {
+function parseLine<T>(opts: {
+  schema: z.ZodType<T>
+  line: string
+  machine: string
+  context: string
+}): T {
   const parsed = errore.try({
-    try: (): unknown => JSON.parse(line),
+    try: (): unknown => JSON.parse(opts.line),
     catch: (e) =>
-      new HermesRowInvalid(`${context}: not valid JSON`, { cause: e }),
+      new HermesRowInvalid({
+        machine: opts.machine,
+        detail: `${opts.context}: not valid JSON`,
+        cause: e,
+      }),
   })
   if (parsed instanceof Error) throw parsed
-  const result = schema.safeParse(parsed)
+  const result = opts.schema.safeParse(parsed)
   if (!result.success) {
-    throw new HermesRowInvalid(`${context}: ${z.prettifyError(result.error)}`)
+    throw new HermesRowInvalid({
+      machine: opts.machine,
+      detail: `${opts.context}: ${z.prettifyError(result.error)}`,
+    })
   }
   return result.data
 }
@@ -110,24 +126,37 @@ export async function splitJsonlToSessionFiles(opts: {
     sessionPaths: [],
   }
   const staged: StagedSession[] = []
+  const seenKeys = new Set<string>()
   let currentKey: string | null = null
   let current: StagedSession | null = null
 
   for await (const line of opts.lines) {
     if (line.length === 0) continue
-    const env = parseLine(
-      rowEnvelopeSchema,
+    const env = parseLine({
+      schema: rowEnvelopeSchema,
       line,
-      `hermes/${opts.machine}: malformed row`,
-    )
+      machine: opts.machine,
+      context: 'malformed row',
+    })
     const key = logicalKey(env)
     if (key !== currentKey) {
+      // The projection groups every row of a logical session contiguously, so a
+      // key that reappears after another key means the stream is interleaved.
+      // Staging a second session under the same path would clobber the first at
+      // commit, so reject the stream instead.
+      if (seenKeys.has(key)) {
+        throw new HermesRowInvalid({
+          machine: opts.machine,
+          detail: `session ${key} reappears after another session`,
+        })
+      }
       assertSafeSegment(key, opts.machine)
-      const header = parseLine(
-        sessionHeaderSchema,
+      const header = parseLine({
+        schema: sessionHeaderSchema,
         line,
-        `hermes/${opts.machine}: session ${key} header`,
-      )
+        machine: opts.machine,
+        context: `session ${key} header`,
+      })
       const dir = path.join(
         opts.dataDir,
         utcDay(new Date(header.latestMessageTime)),
@@ -139,19 +168,22 @@ export async function splitJsonlToSessionFiles(opts: {
       staged.push(current)
       metrics.sessionPaths.push(sessionPath)
       metrics.sessions_pulled += 1
+      seenKeys.add(key)
       currentKey = key
     }
     if (current === null) {
-      throw new HermesRowInvalid(
-        `hermes/${opts.machine}: message ${env.sessionId} precedes its session header`,
-      )
+      throw new HermesRowInvalid({
+        machine: opts.machine,
+        detail: `message ${env.sessionId} precedes its session header`,
+      })
     }
     if (env.type === 'message') {
-      parseLine(
-        messageRowSchema,
+      parseLine({
+        schema: messageRowSchema,
         line,
-        `hermes/${opts.machine}: message ${env.sessionId}`,
-      )
+        machine: opts.machine,
+        context: `message ${env.sessionId}`,
+      })
     }
     const payload = `${line}\n`
     current.chunks.push(payload)

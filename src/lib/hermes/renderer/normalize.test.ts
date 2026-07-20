@@ -263,4 +263,128 @@ describe('normalize tool pairing', () => {
     expect(session.messages).toHaveLength(1)
     expect(session.messages[0]?.role).toBe('user')
   })
+
+  test('a malformed tool-call element degrades to a missing call, keeping the row', () => {
+    const session = normalize(
+      jsonl([
+        {
+          type: 'message',
+          role: 'assistant',
+          content: 'Working on it.',
+          createdAt: 1,
+          toolCalls: [
+            {
+              id: 'c1',
+              call_id: 'c1',
+              type: 'function',
+              function: { name: 'terminal', arguments: '{"command":"ls"}' },
+            },
+            'not a valid call object',
+          ],
+        },
+      ]),
+    )
+
+    expect(session.messages).toHaveLength(1)
+    expect(session.messages[0]?.parts[0]).toEqual({
+      kind: 'text',
+      text: 'Working on it.',
+    })
+    const tools = toolParts(session)
+    expect(tools).toHaveLength(1)
+    expect(tools[0]?.name).toBe('terminal')
+  })
+})
+
+describe('normalize result status', () => {
+  function resultRow(
+    callId: string,
+    content: string,
+    createdAt: number,
+  ): object {
+    return {
+      type: 'message',
+      role: 'tool',
+      toolCallId: callId,
+      content,
+      createdAt,
+    }
+  }
+
+  test('a non-JSON plain-text result is surfaced as a non-success', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'x' } },
+          1,
+        ),
+        resultRow('c1', 'Error: timed out', 2),
+      ]),
+    )
+    const result = toolParts(session)[0]?.result
+    expect(result?.content).toBe('Error: timed out')
+    expect(result?.isError).toBe(true)
+  })
+
+  test('an empty non-JSON result is treated as no output, not a failure', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'x' } },
+          1,
+        ),
+        resultRow('c1', '', 2),
+      ]),
+    )
+    expect(toolParts(session)[0]?.result?.isError).toBe(false)
+  })
+
+  test('an object-shaped error field marks the result as a failure', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow({ callId: 'c1', name: 'patch', input: { mode: 'x' } }, 1),
+        resultRow('c1', JSON.stringify({ error: { message: 'nope' } }), 2),
+      ]),
+    )
+    expect(toolParts(session)[0]?.result?.isError).toBe(true)
+  })
+
+  test('coerces a stringified exit_code so a failure still reads as an error', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'x' } },
+          1,
+        ),
+        resultRow(
+          'c1',
+          JSON.stringify({ output: 'boom', exit_code: '2', error: null }),
+          2,
+        ),
+      ]),
+    )
+    expect(toolParts(session)[0]?.result?.isError).toBe(true)
+  })
+})
+
+describe('normalize role handling', () => {
+  test('skips a row with an unknown role instead of labeling it assistant', () => {
+    const session = normalize(
+      jsonl([
+        {
+          type: 'message',
+          role: 'system',
+          content: 'system prompt text',
+          createdAt: 1,
+        },
+        textRow('user', 'real message', 2),
+      ]),
+    )
+    expect(session.messages).toHaveLength(1)
+    expect(session.messages[0]?.role).toBe('user')
+    expect(session.messages[0]?.parts[0]).toEqual({
+      kind: 'text',
+      text: 'real message',
+    })
+  })
 })

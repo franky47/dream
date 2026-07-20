@@ -29,7 +29,9 @@ from each host. The source reads the Hermes state database
 (`$HOME/.hermes/state.db` by default) in read-only mode over
 `ssh -o BatchMode=yes <host>`, so it never
 writes to the live database. Each host must therefore allow key-based SSH with
-no prompt and have the `sqlite3` command-line client on its `PATH`.
+no prompt and have `sqlite3` on its `PATH`; the memory pull additionally needs
+`find`, `mktemp` and `tar` on the remote host, and `tar` on the local machine to
+unpack the stream.
 
 Cron, webhook and subagent sessions stay out of the archive. User-created
 branches ingest as their own human sessions, and archived sessions are kept —
@@ -72,8 +74,9 @@ The raw JSONL keeps the full source record: system prompt, model and model
 settings, usage, lineage, archive state, platform origin, and per-message
 reasoning and provider metadata. The Markdown stays readable by omitting the
 system prompt, model settings and reasoning, while its frontmatter lists every
-platform ID a session carries (channel, thread, guild, author). A session with
-no such data simply omits those fields, so nothing shows a placeholder ID.
+platform ID a session carries (`user_id`, `session_key`, `chat_id`, `chat_type`,
+`thread_id` and the `display_name` label). A session with no such data simply
+omits those fields, so nothing shows a placeholder ID.
 
 For Discord-sourced turns, the Markdown drops the fixed note Hermes injects to
 tell its reply tool which message triggered the run. Sender, reply and
@@ -88,7 +91,19 @@ count instead of the large body, and `write_file` keeps its resolved path and
 byte count instead of the whole payload. Any other tool falls back to a compact
 self-closing `<tool>` tag, so a new Hermes tool never breaks the render; a
 hostile input key is escaped into the body rather than injected as raw markup. A
-failed tool carries an `error="1"` marker. A run failed when its result reports a
-non-zero `exit_code` or a non-null `error`.
+failed tool carries an `error="1"` marker; a call whose result never arrived (for
+example a pair split across a compaction boundary) carries `result="missing"` so
+a lost result reads differently from no output. A run failed when its result
+reports a non-zero `exit_code` or a non-empty `error` (an error string or an
+error object).
+
+Alongside sessions, the source pulls Hermes' two built-in memory files,
+`MEMORY.md` and `USER.md`, from the remote memories directory
+(`$HOME/.hermes/memories` by default). Each file lands under the UTC day of its
+own modification time in a per-day `memories` bucket
+(`<day>/<host>/hermes/memories/`), so the agent memory and the user profile route
+independently by their own mtime rather than by any session's clock. Only those
+two files are copied; lock files, the state database and optional provider
+subdirectories stay out. The files are copied byte-for-byte and never rendered.
 
 This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
