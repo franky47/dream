@@ -1,11 +1,11 @@
 ---
 # dream-sys9
 title: Add remote Hermes session and memory ingestion
-status: in-progress
+status: done
 type: epic
 priority: normal
 created_at: 2026-07-20T09:37:50Z
-updated_at: 2026-07-20T09:59:58Z
+updated_at: 2026-07-20T14:30:00Z
 ---
 
 ## Problem Statement
