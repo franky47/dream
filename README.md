@@ -35,4 +35,12 @@ Cron, webhook and subagent sessions stay out of the archive. Each selected
 session yields one JSONL file and one Markdown file under the UTC day of its
 latest message.
 
+Tool calls render in a Hermes-specific style. The renderer pairs each tool
+call with its result by call id and gives terminal, read, write, patch,
+search, todo and clarify their own concise shapes: terminal and patch keep
+their command, status and diff, while a write keeps its file statistics
+instead of the whole payload. Any other tool falls back to a compact
+self-closing `<tool>` tag, so a new Hermes tool never breaks the render. A
+failed tool carries an `error="1"` marker.
+
 This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
