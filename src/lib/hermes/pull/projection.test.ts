@@ -21,7 +21,7 @@ let dbPath: string
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
-    source TEXT NOT NULL,
+    source TEXT,
     parent_id TEXT,
     title TEXT,
     archived INTEGER NOT NULL DEFAULT 0,
@@ -47,7 +47,7 @@ function insertSession(
   db: Database,
   s: {
     id: string
-    source?: string
+    source?: string | null
     parentId?: string | null
     title?: string
     archived?: number
@@ -59,7 +59,7 @@ function insertSession(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(
     s.id,
-    s.source ?? 'discord',
+    s.source === undefined ? 'discord' : s.source,
     s.parentId ?? null,
     s.title ?? 'untitled',
     s.archived ?? 0,
@@ -190,29 +190,117 @@ describe('projectRows', () => {
     db.close()
   })
 
-  test('excludes child (non-root) sessions', () => {
+  test('includes a user-created branch as its own human session', () => {
     const db = openFreshDb()
-    insertSession(db, { id: 'ses_root', createdAt: 5_000 })
+    insertSession(db, { id: 'ses_root', source: 'discord', createdAt: 5_000 })
     insertMessage(db, {
       id: 'msg_root',
       sessionId: 'ses_root',
       createdAt: 6_000,
     })
     insertSession(db, {
-      id: 'ses_child',
+      id: 'ses_branch',
+      source: 'discord',
       parentId: 'ses_root',
       createdAt: 6_000,
     })
     insertMessage(db, {
-      id: 'msg_child',
-      sessionId: 'ses_child',
+      id: 'msg_branch',
+      sessionId: 'ses_branch',
       createdAt: 7_000,
     })
 
     const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
 
-    expect(rows.filter((r) => r.type === 'session')).toHaveLength(1)
-    expect(rows[0]?.id).toBe('ses_root')
+    const sessions = rows.filter((r) => r.type === 'session')
+    const ids = sessions.map((r) => r.id)
+    expect(ids).toHaveLength(2)
+    expect(ids).toContain('ses_root')
+    expect(ids).toContain('ses_branch')
+    const branch = sessions.find((r) => r.id === 'ses_branch')
+    expect(branch?.parentId).toBe('ses_root')
+    db.close()
+  })
+
+  test('excludes a delegated subagent child', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_root', source: 'cli', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_root',
+      sessionId: 'ses_root',
+      createdAt: 6_000,
+    })
+    insertSession(db, {
+      id: 'ses_subagent',
+      source: 'subagent',
+      parentId: 'ses_root',
+      createdAt: 6_000,
+    })
+    insertMessage(db, {
+      id: 'msg_subagent',
+      sessionId: 'ses_subagent',
+      createdAt: 7_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    const ids = rows.filter((r) => r.type === 'session').map((r) => r.id)
+    expect(ids).toEqual(['ses_root'])
+    db.close()
+  })
+
+  test('keeps a session whose source is null', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_null', source: null, createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_null',
+      sessionId: 'ses_null',
+      createdAt: 6_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    const ids = rows.filter((r) => r.type === 'session').map((r) => r.id)
+    expect(ids).toEqual(['ses_null'])
+    db.close()
+  })
+
+  test('selects an archived session and retains its archive and lineage', () => {
+    const db = openFreshDb()
+    insertSession(db, {
+      id: 'ses_archived',
+      source: 'discord',
+      parentId: 'ses_origin',
+      archived: 1,
+      createdAt: 5_000,
+    })
+    insertMessage(db, {
+      id: 'msg_archived',
+      sessionId: 'ses_archived',
+      createdAt: 6_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    const session = rows.find((r) => r.type === 'session')
+    expect(session?.id).toBe('ses_archived')
+    expect(session?.archived).toBe(1)
+    expect(session?.parentId).toBe('ses_origin')
+    db.close()
+  })
+
+  test('marks a non-archived session with archived 0', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_live', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_live',
+      sessionId: 'ses_live',
+      createdAt: 6_000,
+    })
+
+    const row = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))[0]
+    expect(row?.archived).toBe(0)
+    expect(row?.parentId).toBeNull()
     db.close()
   })
 

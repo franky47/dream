@@ -7,6 +7,7 @@ const sessionRowSchema = z.object({
   sessionId: z.string(),
   source: z.string().nullable().optional(),
   title: z.string().nullable().optional(),
+  archived: z.number().nullable().optional(),
 })
 
 const messageRowSchema = z.object({
@@ -22,6 +23,7 @@ export interface Frontmatter {
   sessionId: string
   source: string
   title: string
+  archived: boolean
   startedAt: string
   endedAt: string
   turns: number
@@ -69,6 +71,7 @@ export function extractFrontmatter(jsonlText: string): Frontmatter {
     sessionId: session?.sessionId ?? '',
     source: session?.source ?? '',
     title: session?.title ?? '',
+    archived: (session?.archived ?? 0) > 0,
     startedAt,
     endedAt,
     turns: messages.filter((m) => m.role === 'user').length,
@@ -85,6 +88,9 @@ export function frontmatterToYaml(fm: Frontmatter): string {
   lines.push(`sessionId: ${fm.sessionId}`)
   lines.push(`source: ${yamlEscapeString(fm.source)}`)
   lines.push(`title: ${yamlEscapeString(fm.title)}`)
+  // Only archived sessions carry the flag; its absence means "not archived", so
+  // a live session's frontmatter stays free of a redundant `archived: false`.
+  if (fm.archived) lines.push('archived: true')
   lines.push(`startedAt: ${fm.startedAt}`)
   lines.push(`endedAt: ${fm.endedAt}`)
   lines.push(`turns: ${fm.turns}`)

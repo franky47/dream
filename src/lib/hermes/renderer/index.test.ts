@@ -58,4 +58,19 @@ describe('renderHermesSession', () => {
     expect(md).toContain('sessionId: ses_1')
     expect(md).toContain('turns: 0')
   })
+
+  test('marks an archived session with archived: true', () => {
+    const md = renderHermesSession(jsonl([{ ...SESSION, archived: 1 }]))
+    expect(md).toContain('archived: true')
+  })
+
+  test('omits the archived field on a live session', () => {
+    const md = renderHermesSession(jsonl([{ ...SESSION, archived: 0 }]))
+    expect(md).not.toContain('archived:')
+  })
+
+  test('omits the archived field when the flag is absent', () => {
+    const md = renderHermesSession(jsonl([SESSION]))
+    expect(md).not.toContain('archived:')
+  })
 })

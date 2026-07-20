@@ -31,8 +31,10 @@ from each host. The source reads the Hermes state database
 writes to the live database. Each host must therefore allow key-based SSH with
 no prompt and have the `sqlite3` command-line client on its `PATH`.
 
-Cron, webhook and subagent sessions stay out of the archive. Each selected
-session yields one JSONL file and one Markdown file under the UTC day of its
-latest message.
+Cron, webhook and subagent sessions stay out of the archive. User-created
+branches ingest as their own human sessions, and archived sessions are kept —
+their Markdown carries `archived: true`, which is absent on live sessions. Each
+selected session yields one JSONL file and one Markdown file under the UTC day of
+its latest message.
 
 This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
