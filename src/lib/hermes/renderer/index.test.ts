@@ -58,4 +58,26 @@ describe('renderHermesSession', () => {
     expect(md).toContain('sessionId: ses_1')
     expect(md).toContain('turns: 0')
   })
+
+  test('strips the Discord trigger note from user text but keeps context', () => {
+    const md = renderHermesSession(
+      jsonl([
+        SESSION,
+        {
+          type: 'message',
+          id: 'msg_1',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'user',
+          content:
+            'Sender: alice\n[Reply to Discord message 1417900000000000000 to respond.]\n\nWhat should I do?',
+          createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
+        },
+      ]),
+    )
+
+    expect(md).toContain('Sender: alice')
+    expect(md).toContain('What should I do?')
+    expect(md).not.toContain('Discord message 1417900000000000000')
+  })
 })
