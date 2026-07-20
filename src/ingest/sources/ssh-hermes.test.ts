@@ -4,6 +4,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -11,7 +12,9 @@ import path from 'node:path'
 
 import {
   buildRemoteCmd,
+  buildRemoteMemoryCmd,
   ingestSshHermes,
+  runSshHermesMemoryPipeline,
   runSshHermesPipeline,
 } from '#src/ingest/sources/ssh-hermes'
 
@@ -207,5 +210,230 @@ describe('runSshHermesPipeline', () => {
     expect(result.message).toContain('host=invalid.example')
     expect(result.message).toContain('ssh=255')
     expect(result.message).toContain('Could not resolve')
+  })
+})
+
+describe('buildRemoteMemoryCmd', () => {
+  test('discovers only MEMORY.md and USER.md from the default hermes dir', () => {
+    const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
+    expect(cmd).toContain('cd $HOME/.hermes && ')
+    expect(cmd).toContain(`-name 'MEMORY.md'`)
+    expect(cmd).toContain(`-name 'USER.md'`)
+  })
+
+  test('caps the search at the memory dir so provider subdirs stay out', () => {
+    const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
+    expect(cmd).toContain('-maxdepth 1')
+  })
+
+  test('streams the matches through tar to preserve mtime', () => {
+    const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
+    expect(cmd).toContain('tar --null --no-recursion -czf - -T -')
+  })
+
+  test('anchors the archive so an empty match does not fail tar', () => {
+    const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
+    expect(cmd).toContain(`{ printf '.\\0';`)
+    expect(cmd).toContain('--no-recursion')
+  })
+
+  test('bounds the search below by the since instant', () => {
+    const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
+    expect(cmd).toContain(`-newermt '2026-05-09 12:00:00 UTC'`)
+  })
+
+  test('leaves the default $HOME memory dir unquoted so the shell expands it', () => {
+    const cmd = buildRemoteMemoryCmd({ sinceMs: 0 })
+    expect(cmd).not.toContain(`'$HOME/.hermes'`)
+  })
+
+  test('shell-quotes a custom memory dir', () => {
+    const cmd = buildRemoteMemoryCmd({
+      sinceMs: 0,
+      memoryDir: '/var/lib/hermes',
+    })
+    expect(cmd).toContain(`cd '/var/lib/hermes' && `)
+  })
+})
+
+describe('runSshHermesMemoryPipeline', () => {
+  const SINCE = new Date(Date.UTC(2026, 4, 9, 0, 0, 0))
+  const UNTIL = new Date(Date.UTC(2026, 4, 11, 0, 0, 0))
+
+  function memBucket(day: string): string {
+    return path.join(dataDir, day, 'echo', 'hermes', 'memories')
+  }
+
+  function writeMemoryFixture(
+    files: ReadonlyArray<{ name: string; content: string; mtimeMs: number }>,
+  ): string {
+    const dir = path.join(
+      workDir,
+      `mem-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    )
+    mkdirSync(dir, { recursive: true })
+    for (const file of files) {
+      const abs = path.join(dir, file.name)
+      writeFileSync(abs, file.content)
+      const seconds = file.mtimeMs / 1000
+      utimesSync(abs, seconds, seconds)
+    }
+    return dir
+  }
+
+  function tarUpstream(dir: string, names: ReadonlyArray<string>): string[] {
+    return ['tar', '-czf', '-', '-C', dir, ...names]
+  }
+
+  test('copies both files byte-for-byte into their own UTC day buckets', async () => {
+    const dir = writeMemoryFixture([
+      { name: 'MEMORY.md', content: '# agent memory\n', mtimeMs: DAY1_MS },
+      { name: 'USER.md', content: '# user profile\n', mtimeMs: DAY2_MS },
+    ])
+
+    const result = await runSshHermesMemoryPipeline({
+      upstream: tarUpstream(dir, ['MEMORY.md', 'USER.md']),
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result.memories_pulled).toBe(2)
+    expect(result.bytes).toBe(
+      Buffer.byteLength('# agent memory\n') +
+        Buffer.byteLength('# user profile\n'),
+    )
+    expect(readFileSync(path.join(memBucket(DAY1), 'MEMORY.md'), 'utf-8')).toBe(
+      '# agent memory\n',
+    )
+    expect(readFileSync(path.join(memBucket(DAY2), 'USER.md'), 'utf-8')).toBe(
+      '# user profile\n',
+    )
+    expect(listFiles(dataDir)).toEqual([
+      `${DAY1}/echo/hermes/memories/MEMORY.md`,
+      `${DAY2}/echo/hermes/memories/USER.md`,
+    ])
+  })
+
+  test('generates no sibling renderer output for memory markdown', async () => {
+    const dir = writeMemoryFixture([
+      { name: 'MEMORY.md', content: '# agent memory\n', mtimeMs: DAY1_MS },
+    ])
+
+    await runSshHermesMemoryPipeline({
+      upstream: tarUpstream(dir, ['MEMORY.md']),
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(readdirSync(memBucket(DAY1)).sort()).toEqual(['MEMORY.md'])
+  })
+
+  test('treats a missing memory file as harmless', async () => {
+    const dir = writeMemoryFixture([
+      { name: 'MEMORY.md', content: 'only me\n', mtimeMs: DAY1_MS },
+    ])
+
+    const result = await runSshHermesMemoryPipeline({
+      upstream: tarUpstream(dir, ['MEMORY.md']),
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result.memories_pulled).toBe(1)
+    expect(listFiles(dataDir)).toEqual([
+      `${DAY1}/echo/hermes/memories/MEMORY.md`,
+    ])
+  })
+
+  test('reports zero when no memory files are present', async () => {
+    const dir = writeMemoryFixture([])
+
+    const result = await runSshHermesMemoryPipeline({
+      upstream: tarUpstream(dir, ['.']),
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result).toEqual({ memories_pulled: 0, bytes: 0 })
+  })
+
+  test('treats the anchor-only archive of an empty match as zero memories', async () => {
+    const emptyDir = writeMemoryFixture([])
+    const result = await runSshHermesMemoryPipeline({
+      upstream: [
+        'sh',
+        '-c',
+        `cd ${emptyDir} && printf '.\\0' | tar --null --no-recursion -czf - -T -`,
+      ],
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result).toEqual({ memories_pulled: 0, bytes: 0 })
+  })
+
+  test('excludes files modified outside the half-open window', async () => {
+    const beforeSince = Date.UTC(2026, 4, 8, 12, 0, 0)
+    const atUntil = UNTIL.getTime()
+    const dir = writeMemoryFixture([
+      { name: 'MEMORY.md', content: 'too old\n', mtimeMs: beforeSince },
+      { name: 'USER.md', content: 'too new\n', mtimeMs: atUntil },
+    ])
+
+    const result = await runSshHermesMemoryPipeline({
+      upstream: tarUpstream(dir, ['MEMORY.md', 'USER.md']),
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result).toEqual({ memories_pulled: 0, bytes: 0 })
+  })
+
+  test('ignores lock files and other memory-directory entries', async () => {
+    const dir = writeMemoryFixture([
+      { name: 'MEMORY.md', content: 'kept\n', mtimeMs: DAY1_MS },
+      { name: 'MEMORY.md.lock', content: '', mtimeMs: DAY1_MS },
+      { name: 'notes.txt', content: 'skip me\n', mtimeMs: DAY1_MS },
+    ])
+
+    const result = await runSshHermesMemoryPipeline({
+      upstream: tarUpstream(dir, ['.']),
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result.memories_pulled).toBe(1)
+    expect(listFiles(dataDir)).toEqual([
+      `${DAY1}/echo/hermes/memories/MEMORY.md`,
+    ])
+  })
+
+  test('throws when the upstream transport fails', async () => {
+    const result = await runSshHermesMemoryPipeline({
+      upstream: ['sh', '-c', 'echo "ssh: Could not resolve" >&2; exit 255'],
+      dataDir,
+      host: 'invalid.example',
+      since: SINCE,
+      until: UNTIL,
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    if (!(result instanceof Error)) throw new Error('unreachable')
+    expect(result.message).toContain('host=invalid.example')
+    expect(result.message).toContain('ssh=255')
   })
 })
