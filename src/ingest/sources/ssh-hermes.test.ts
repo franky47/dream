@@ -158,6 +158,48 @@ describe('runSshHermesPipeline', () => {
     ).toContain('sessionId: ses_a')
   })
 
+  test('renders a compacted session as numbered context-window fragments', async () => {
+    const summary =
+      'Safety prefix the reader never sees.\n\n' +
+      '[hermes:compaction-summary]\nWe planned the refactor.\n' +
+      '[/hermes:compaction-summary]'
+    const fixturePath = path.join(workDir, 'fixture.jsonl')
+    writeFileSync(
+      fixturePath,
+      [
+        sessionLine('ses_c', DAY1_MS),
+        messageLine('m1', 'ses_c', DAY1_MS),
+        JSON.stringify({
+          type: 'message',
+          id: 'm2',
+          sessionId: 'ses_c',
+          turn: 2,
+          role: 'assistant',
+          content: summary,
+          activity: 'active',
+          createdAt: DAY1_MS + 1_000,
+        }),
+        messageLine('m3', 'ses_c', DAY1_MS + 2_000),
+      ].join('\n') + '\n',
+    )
+
+    await runSshHermesPipeline({
+      upstream: ['cat', fixturePath],
+      dataDir,
+      host: 'echo',
+    })
+
+    expect(listFiles(dataDir)).toEqual([
+      `${DAY1}/echo/hermes/ses_c.1.md`,
+      `${DAY1}/echo/hermes/ses_c.2.md`,
+      `${DAY1}/echo/hermes/ses_c.jsonl`,
+    ])
+    const two = readFileSync(path.join(bucket(DAY1), 'ses_c.2.md'), 'utf-8')
+    expect(two).toContain('<compaction')
+    expect(two).toContain('We planned the refactor.')
+    expect(two).not.toContain('Safety prefix')
+  })
+
   test('leaves snapshots in unrelated day buckets untouched', async () => {
     const priorDir = path.join(dataDir, '2026-05-01', 'echo', 'hermes')
     mkdirSync(priorDir, { recursive: true })

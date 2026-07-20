@@ -32,8 +32,18 @@ writes to the live database. Each host must therefore allow key-based SSH with
 no prompt and have the `sqlite3` command-line client on its `PATH`.
 
 Cron, webhook and subagent sessions stay out of the archive. Each selected
-session yields one JSONL file and one Markdown file under the UTC day of its
-latest message.
+session yields one JSONL file under the UTC day of its latest message. A session
+with no compaction also yields one Markdown file. A session compacted once in
+place splits into two context-window fragments, `<id>.1.md` and `<id>.2.md`.
+
+Each fragment carries its own frontmatter (times, turns and tool counts for that
+window) plus a `contextWindow` number; the first also names its
+`nextContextWindow` and ends with a relative Markdown link to the second. The
+second fragment opens with a `<compaction>` block holding the summary Hermes sent
+to the model — its turn number, stored role and relative time, with the safety
+prefix and end marker stripped — and then repeats the recent tail Hermes
+preserved, so the file matches the context the model saw. The raw JSONL keeps
+every archived and live row untouched, including each message's `activity` state.
 
 The raw JSONL keeps the full source record: system prompt, model and model
 settings, usage, lineage, archive state, platform origin, and per-message

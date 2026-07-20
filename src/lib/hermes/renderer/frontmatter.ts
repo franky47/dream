@@ -34,11 +34,14 @@ export interface Frontmatter {
   startedAt: string
   endedAt: string
   turns: number
+  tools?: number
+  contextWindow?: number
+  nextContextWindow?: number
   platform: Record<string, PlatformField>
   renderer: string
 }
 
-function scalarPlatformFields(
+export function scalarPlatformFields(
   platform: unknown,
 ): Record<string, PlatformField> {
   const out: Record<string, PlatformField> = {}
@@ -120,6 +123,13 @@ export function frontmatterToYaml(fm: Frontmatter): string {
   lines.push(`startedAt: ${fm.startedAt}`)
   lines.push(`endedAt: ${fm.endedAt}`)
   lines.push(`turns: ${fm.turns}`)
+  if (fm.tools !== undefined) lines.push(`tools: ${fm.tools}`)
+  if (fm.contextWindow !== undefined) {
+    lines.push(`contextWindow: ${fm.contextWindow}`)
+  }
+  if (fm.nextContextWindow !== undefined) {
+    lines.push(`nextContextWindow: ${fm.nextContextWindow}`)
+  }
   const platformKeys = Object.keys(fm.platform).sort()
   if (platformKeys.length > 0) {
     lines.push('platform:')

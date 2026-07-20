@@ -38,6 +38,7 @@ const SCHEMA_STATEMENTS = [
     turn INTEGER NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    activity TEXT,
     reasoning TEXT,
     metadata TEXT,
     created_at INTEGER NOT NULL
@@ -94,6 +95,7 @@ function insertMessage(
     turn?: number
     role?: string
     content?: string
+    activity?: string | null
     reasoning?: string | null
     metadata?: string | null
     createdAt: number
@@ -101,14 +103,16 @@ function insertMessage(
 ): void {
   db.prepare(
     `INSERT INTO messages
-       (id, session_id, turn, role, content, reasoning, metadata, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, session_id, turn, role, content, activity, reasoning, metadata,
+        created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     m.id,
     m.sessionId,
     m.turn ?? 1,
     m.role ?? 'user',
     m.content ?? 'hello',
+    m.activity ?? null,
     m.reasoning ?? null,
     m.metadata ?? null,
     m.createdAt,
@@ -333,6 +337,50 @@ describe('projectRows', () => {
     db.close()
   })
 
+  test('retains archived pre-compaction rows and live rows with their activity', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_1', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_old',
+      sessionId: 'ses_1',
+      activity: 'archived',
+      content: 'earlier question',
+      createdAt: 6_000,
+    })
+    insertMessage(db, {
+      id: 'msg_summary',
+      sessionId: 'ses_1',
+      activity: 'active',
+      role: 'assistant',
+      content:
+        '[hermes:compaction-summary]\nWe discussed X.\n[/hermes:compaction-summary]',
+      createdAt: 7_000,
+    })
+    insertMessage(db, {
+      id: 'msg_live',
+      sessionId: 'ses_1',
+      activity: 'active',
+      content: 'follow-up question',
+      createdAt: 8_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+    const messages = rows.filter((r) => r.type === 'message')
+
+    expect(messages.map((m) => m.id)).toEqual([
+      'msg_old',
+      'msg_summary',
+      'msg_live',
+    ])
+    expect(messages.map((m) => m.activity)).toEqual([
+      'archived',
+      'active',
+      'active',
+    ])
+    expect(messages[1]?.content).toContain('[hermes:compaction-summary]')
+    db.close()
+  })
+
   test('emits null for missing optional metadata without inventing values', () => {
     const db = openFreshDb()
     insertSession(db, { id: 'ses_1', createdAt: 5_000 })
@@ -347,6 +395,7 @@ describe('projectRows', () => {
     expect(session?.modelSettings).toBeNull()
     expect(session?.usage).toBeNull()
     expect(session?.platform).toBeNull()
+    expect(message?.activity).toBeNull()
     expect(message?.reasoning).toBeNull()
     expect(message?.metadata).toBeNull()
     db.close()

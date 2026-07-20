@@ -15,6 +15,11 @@ import type { Database } from 'bun:sqlite'
 // JSON rather than an escaped string. The Markdown renderer omits the noisy
 // ones (system prompt, model settings, reasoning) while keeping the archive
 // complete.
+//
+// Each message carries its `activity` state (active vs archived) so the raw
+// record keeps both the rows compaction archived and the live-context rows that
+// replaced them. Compaction itself has no dedicated flag: the summary row is a
+// normal message whose `content` carries stable markers, retained verbatim.
 function eligibleSessionsCte(
   sinceLiteral: string,
   untilLiteral: string,
@@ -77,6 +82,7 @@ function projectionSqlTemplate(
           'role', m.role,
           'content', m.content,
           'createdAt', m.created_at,
+          'activity', m.activity,
           'reasoning', m.reasoning,
           'metadata', json(m.metadata)
         ) AS row,
