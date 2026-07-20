@@ -39,14 +39,15 @@ function toolCallRow(
 }
 
 // A tool result is a later `role='tool'` row keyed by `tool_call_id`; its content
-// is a JSON object such as `{"output":"..."}` or `{"success":false,...}`.
+// is a JSON object such as `{"output":"..."}`. A terminal failure carries a
+// non-zero `exit_code`.
 function toolResultRow(
   result: { callId: string; output?: string; isError?: boolean },
   createdAt: number,
 ): object {
   const body = result.isError
-    ? { success: false, output: result.output }
-    : { output: result.output }
+    ? { output: result.output, exit_code: 1, error: null }
+    : { output: result.output, exit_code: 0, error: null }
   return {
     type: 'message',
     role: 'tool',
@@ -131,7 +132,7 @@ describe('normalize tool pairing', () => {
     expect(message?.parts[1]).toMatchObject({ kind: 'tool', name: 'terminal' })
   })
 
-  test('marks a failed tool result as an error', () => {
+  test('marks a non-zero exit_code result as an error', () => {
     const session = normalize(
       jsonl([
         toolCallRow(
@@ -142,6 +143,75 @@ describe('normalize tool pairing', () => {
       ]),
     )
     expect(toolParts(session)[0]?.result?.isError).toBe(true)
+  })
+
+  test('marks a result with a non-null error field as an error', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow({ callId: 'c1', name: 'patch', input: { mode: 'x' } }, 1),
+        {
+          type: 'message',
+          role: 'tool',
+          toolCallId: 'c1',
+          content: JSON.stringify({ error: 'Refusing to write' }),
+          createdAt: 2,
+        },
+      ]),
+    )
+    expect(toolParts(session)[0]?.result?.isError).toBe(true)
+  })
+
+  test('treats a zero exit_code result as a success', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'x' } },
+          1,
+        ),
+        toolResultRow({ callId: 'c1', output: 'ok', isError: false }, 2),
+      ]),
+    )
+    expect(toolParts(session)[0]?.result?.isError).toBe(false)
+  })
+
+  test('reads a null-content result from apiContent when it is a JSON object', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'x' } },
+          1,
+        ),
+        {
+          type: 'message',
+          role: 'tool',
+          toolCallId: 'c1',
+          content: null,
+          apiContent: JSON.stringify({ output: 'from api', exit_code: 0 }),
+          createdAt: 2,
+        },
+      ]),
+    )
+    expect(toolParts(session)[0]?.result?.content).toBe('from api')
+  })
+
+  test('ignores an apiContent payload that is not a JSON object', () => {
+    const session = normalize(
+      jsonl([
+        toolCallRow(
+          { callId: 'c1', name: 'terminal', input: { command: 'x' } },
+          1,
+        ),
+        {
+          type: 'message',
+          role: 'tool',
+          toolCallId: 'c1',
+          content: null,
+          apiContent: '"just a string"',
+          createdAt: 2,
+        },
+      ]),
+    )
+    expect(toolParts(session)[0]?.result).toBeUndefined()
   })
 
   test('leaves an unmatched result harmless', () => {

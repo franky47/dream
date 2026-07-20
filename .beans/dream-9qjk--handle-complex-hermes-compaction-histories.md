@@ -56,3 +56,17 @@ keeps its markers verbatim.
 Continuation/chain joining stays out of scope (dream-053f). README updated to
 describe multi-window fragments and the recognised marker forms.
 
+## Reconciliation delta
+
+Live Echo data reconciliation removed the speculative marker forms. Only one
+summary marker appears in real sessions — a fixed instruction prefix wrapping the
+Markdown summary, closed by a fixed end marker. The older short-tag and merged
+`compaction-summary:merged` forms showed zero live occurrences, so the renderer no
+longer claims or attempts to detect them (project rule: don't render unverified
+carriers). Detection keys on the single verified prefix; cleanup strips it and the
+end marker, tolerating a missing end marker. The compaction block is now the
+window's first turn (`n="1"`, its role, `t="0"`); body turns number from 2 and the
+summary counts toward the fragment's `turns`. Joined-chain frontmatter now
+describes the whole logical session: any archived member marks it archived and
+platform IDs fold across members. README updated to this truth.
+

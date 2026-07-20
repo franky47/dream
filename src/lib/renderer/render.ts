@@ -53,10 +53,11 @@ function renderTurns<S>(
   config: RenderConfig<S>,
   ctx: RenderCtx<S>,
   anchorMs: number | null,
+  startTurn: number,
 ): string {
   let firstStampMs: number | null = anchorMs
   const bodyParts: string[] = []
-  let n = 0
+  let n = startTurn - 1
   for (const msg of messages) {
     n += 1
     let t: string | null
@@ -81,20 +82,22 @@ export function renderSession<S>(
 ): string {
   const state = config.preprocess(session.messages)
   const ctx: RenderCtx<S> = { state }
-  const body = renderTurns(session.messages, config, ctx, null)
+  const body = renderTurns(session.messages, config, ctx, null, 1)
   return `${session.frontmatterYaml}\n${body}\n`
 }
 
 // The fragment renderer reuses the turn machinery for one context window, minus
 // the frontmatter the caller supplies per window. An anchor seeds the elapsed
 // clock so a window's turns count from its compaction summary, not their own
-// first row.
+// first row. `startTurn` lets a caller reserve earlier turn numbers: a compacted
+// window renders its summary as turn 1, so its body turns start at 2.
 export function renderConversation<S>(
   messages: readonly NormalizedMessage[],
   config: RenderConfig<S>,
   anchorMs: number | null,
+  startTurn = 1,
 ): string {
   const state = config.preprocess(messages)
   const ctx: RenderCtx<S> = { state }
-  return renderTurns(messages, config, ctx, anchorMs)
+  return renderTurns(messages, config, ctx, anchorMs, startTurn)
 }

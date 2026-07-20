@@ -45,4 +45,18 @@ describe('stripDiscordTriggerNote', () => {
   test('returns an empty string when the note is the only content', () => {
     expect(stripDiscordTriggerNote(TRIGGER)).toBe('')
   })
+
+  test('keeps a note quoted later in the body, stripping only the leading one', () => {
+    const body = `[François Best] Here is the raw note I received:\n${TRIGGER}\nWhat does it mean?`
+    const cleaned = stripDiscordTriggerNote(`${TRIGGER}\n\n${body}`)
+    expect(cleaned).toBe(body)
+    expect(cleaned).toContain('Triggering message id')
+  })
+
+  test('strips several leading notes but no later occurrence', () => {
+    const cleaned = stripDiscordTriggerNote(
+      `${TRIGGER}\n${TRIGGER}\n\n[Alice] hello`,
+    )
+    expect(cleaned).toBe('[Alice] hello')
+  })
 })

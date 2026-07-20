@@ -59,3 +59,20 @@ compactly), and a malformed known-envelope row is skipped rather than leaked.
 A follow-up should reconcile the tool names and field keys against real Echo
 session data once SSH access is available.
 
+## Reconciliation delta
+
+Reconciled against live Echo tool captures. The verified tool names are
+`terminal`, `skill_view`, `read_file`, `write_file`, `patch`, `search_files`,
+`todo` and `clarify`; the earlier `read`/`write`/`search` names were modeled, not
+real. A terminal result is `{output, exit_code, error}` (extra keys such as
+`approval` may ride along), so failure is a non-zero `exit_code` or a non-null
+`error` — the modeled `success:false` flag never appears on real rows and no
+longer drives the error marker. A failed terminal run now surfaces its
+`exit_code`. Verified result shapes drive the bespoke renderers: `read_file`
+`{content}`, `write_file` `{bytes_written, resolved_path, ...}`, `patch` may be
+`{error}`, `search_files` `{total_count, matches_text, ...}`, `todo` `{todos}`,
+`clarify` `{question, choices_offered, ...}`. The fallback now sanitizes input
+keys: only XML-safe names become attributes, a hostile key is escaped into the
+body. When a tool-result row has null `content`, the projected `apiContent` is
+read only if it parses to a JSON object, else the result keeps dropping.
+
