@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, rm, stat, unlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -65,15 +65,26 @@ export function buildRemoteCmd(opts: {
   return `sqlite3 -readonly ${quotedDbPath} ${shellSingleQuote(sql)}`
 }
 
+// The leading `.` anchor plus `--no-recursion` keeps tar from the "cowardly
+// refusing to create an empty archive" failure when zero files reach the stream:
+// the current directory is archived as a bare entry (never its contents) that
+// the extraction side ignores.
+const EMPTY_ARCHIVE = `printf '.\\0' | tar --null --no-recursion -czf - -T -`
+
 // Only the two built-in memory files reach the tar stream: `-maxdepth 1` keeps
 // the search shallow so optional provider subdirectories stay untouched, and
 // `-newermt` bounds it below by the ingest window's since instant. `tar`
 // preserves each file's mtime so the pipeline can route by modification time.
 //
-// The leading `.` anchor plus `--no-recursion` keeps tar from the "cowardly
-// refusing to create an empty archive" failure when no memory file changed in
-// the window: the memory directory is archived as a bare directory entry (never
-// its contents, so the state db stays out) that the extraction side ignores.
+// A fresh Hermes install has no memories directory, so the whole command guards
+// on `[ -d ]` and falls back to the empty anchored archive: a missing optional
+// directory is the empty case, not a failure that would reject the parallel
+// session pull too.
+//
+// `find` output lands in a temp file behind `&&` before tar consumes it. A raw
+// `find ... | tar` pipeline reports only tar's status, so a `find` failure would
+// masquerade as an empty success; routing through the file lets a `find` error
+// short-circuit the chain and propagate its non-zero exit.
 export function buildRemoteMemoryCmd(opts: {
   sinceMs: number
   memoryDir?: string
@@ -83,14 +94,36 @@ export function buildRemoteMemoryCmd(opts: {
   const sinceStr = formatSinceForFind(
     new Date(opts.sinceMs - FIND_OVER_INCLUSIVE_MS),
   )
-  return (
-    `cd ${quotedDir} && ` +
-    `{ printf '.\\0'; ` +
+  const find =
     `find . -maxdepth 1 ` +
     `\\( -name 'MEMORY.md' -o -name 'USER.md' \\) ` +
-    `-newermt '${sinceStr}' -print0; } ` +
-    `| tar --null --no-recursion -czf - -T -`
-  )
+    `-newermt '${sinceStr}' -print0`
+  const present =
+    `cd ${quotedDir} && ` +
+    `list=$(mktemp) && ` +
+    `${find} > "$list" && ` +
+    `{ printf '.\\0'; cat "$list"; } | tar --null --no-recursion -czf - -T -; ` +
+    `status=$?; rm -f "$list"; exit $status`
+  return `if [ -d ${quotedDir} ]; then ${present}; else ${EMPTY_ARCHIVE}; fi`
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// A session that compacts (or shrinks its window count) later the same day
+// re-renders into a different fragment set: unnumbered `<id>.md` becomes
+// `<id>.1.md`/`<id>.2.md`, or a wider set shrinks. Clearing the whole `<id>`
+// fragment family in the target day bucket before writing keeps stale siblings
+// from lingering beside the fresh set. The `.jsonl` never matches, and older
+// day buckets are never scanned.
+async function removeStaleFragments(dir: string, id: string): Promise<void> {
+  const pattern = new RegExp(`^${escapeRegExp(id)}(\\.\\d+)?\\.md$`)
+  const entries = await readdir(dir)
+  for (const entry of entries) {
+    if (!pattern.test(entry)) continue
+    await unlink(path.join(dir, entry))
+  }
 }
 
 async function readAll(
@@ -182,6 +215,7 @@ export async function runSshHermesPipeline(opts: {
   for (const jsonlPath of sessionPaths) {
     const jsonlText = await Bun.file(jsonlPath).text()
     const base = jsonlPath.replace(/\.jsonl$/, '')
+    await removeStaleFragments(path.dirname(base), path.basename(base))
     for (const fragment of renderHermesFragments(jsonlText)) {
       const suffix =
         fragment.contextWindow === null ? '' : `.${fragment.contextWindow}`
@@ -276,12 +310,19 @@ export async function runSshHermesMemoryPipeline(opts: {
   }
 }
 
+// `--` terminates ssh option parsing before the host, so a host that somehow
+// reached here starting with `-` reads as a target, never as an ssh flag. Config
+// already rejects such hosts; this is defense in depth at the argv boundary.
+export function buildSshBase(host: string): string[] {
+  return ['ssh', '-o', 'BatchMode=yes', '--', host]
+}
+
 export function ingestSshHermes(opts: { host: string }): Source {
   return {
     machine: opts.host,
     source: SOURCE,
     pull: async ({ dataDir, since, until }) => {
-      const sshBase = ['ssh', '-o', 'BatchMode=yes', opts.host]
+      const sshBase = buildSshBase(opts.host)
       const [sessions, memories] = await Promise.all([
         runSshHermesPipeline({
           upstream: [

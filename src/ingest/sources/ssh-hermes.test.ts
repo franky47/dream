@@ -13,6 +13,7 @@ import path from 'node:path'
 import {
   buildRemoteCmd,
   buildRemoteMemoryCmd,
+  buildSshBase,
   ingestSshHermes,
   runSshHermesMemoryPipeline,
   runSshHermesPipeline,
@@ -62,6 +63,18 @@ describe('ingestSshHermes', () => {
     const src = ingestSshHermes({ host: 'echo' })
     expect(src.machine).toBe('echo')
     expect(src.source).toBe('hermes')
+  })
+})
+
+describe('buildSshBase', () => {
+  test('terminates ssh option parsing with -- right before the host', () => {
+    expect(buildSshBase('echo')).toEqual([
+      'ssh',
+      '-o',
+      'BatchMode=yes',
+      '--',
+      'echo',
+    ])
   })
 })
 
@@ -296,6 +309,75 @@ describe('runSshHermesPipeline', () => {
     expect(readFileSync(priorFile, 'utf-8')).toBe('kept\n')
   })
 
+  test('removes a stale unnumbered md when a session later compacts', async () => {
+    const summary =
+      '[CONTEXT COMPACTION — REFERENCE ONLY] handoff, avoid repeating it:\n' +
+      'We planned the refactor.\n' +
+      '--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---'
+    const dir = bucket(DAY1)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'ses_c.md'), 'stale unnumbered render\n')
+
+    const fixturePath = path.join(workDir, 'fixture.jsonl')
+    writeFileSync(
+      fixturePath,
+      [
+        sessionLine('ses_c', DAY1_MS),
+        messageLine('m1', 'ses_c', DAY1_MS),
+        JSON.stringify({
+          type: 'message',
+          id: 'm2',
+          sessionId: 'ses_c',
+          role: 'user',
+          content: summary,
+          active: 1,
+          createdAt: DAY1_MS + 1_000,
+        }),
+        messageLine('m3', 'ses_c', DAY1_MS + 2_000),
+      ].join('\n') + '\n',
+    )
+
+    await runSshHermesPipeline({
+      upstream: ['cat', fixturePath],
+      dataDir,
+      host: 'echo',
+    })
+
+    expect(listFiles(dataDir)).toEqual([
+      `${DAY1}/echo/hermes/ses_c.1.md`,
+      `${DAY1}/echo/hermes/ses_c.2.md`,
+      `${DAY1}/echo/hermes/ses_c.jsonl`,
+    ])
+  })
+
+  test('removes higher-numbered leftovers when the window count shrinks', async () => {
+    const dir = bucket(DAY1)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'ses_a.1.md'), 'old fragment 1\n')
+    writeFileSync(path.join(dir, 'ses_a.2.md'), 'old fragment 2\n')
+    writeFileSync(path.join(dir, 'ses_a.3.md'), 'old fragment 3\n')
+
+    const fixturePath = path.join(workDir, 'fixture.jsonl')
+    writeFileSync(
+      fixturePath,
+      [
+        sessionLine('ses_a', DAY1_MS),
+        messageLine('msg_a', 'ses_a', DAY1_MS),
+      ].join('\n') + '\n',
+    )
+
+    await runSshHermesPipeline({
+      upstream: ['cat', fixturePath],
+      dataDir,
+      host: 'echo',
+    })
+
+    expect(listFiles(dataDir)).toEqual([
+      `${DAY1}/echo/hermes/ses_a.jsonl`,
+      `${DAY1}/echo/hermes/ses_a.md`,
+    ])
+  })
+
   test('handles an empty stdout (no recent sessions) as success', async () => {
     const result = await runSshHermesPipeline({
       upstream: ['sh', '-c', 'true'],
@@ -411,6 +493,22 @@ describe('buildRemoteMemoryCmd', () => {
       memoryDir: '/var/lib/hermes',
     })
     expect(cmd).toContain(`cd '/var/lib/hermes' && `)
+  })
+
+  test('guards on the directory and falls back to an empty anchored archive', () => {
+    const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
+    expect(cmd).toContain('if [ -d $HOME/.hermes/memories ]; then ')
+    expect(cmd).toContain(
+      `else printf '.\\0' | tar --null --no-recursion -czf - -T -; fi`,
+    )
+  })
+
+  test('propagates a find failure by routing its output through a temp file', () => {
+    // `find ... | tar` reports only tar's status, so find output lands in a temp
+    // file behind `&&`; a find error short-circuits the chain before tar runs.
+    const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
+    expect(cmd).toContain(`-print0 > "$list" && `)
+    expect(cmd).toContain('status=$?; rm -f "$list"; exit $status')
   })
 })
 
@@ -538,6 +636,25 @@ describe('runSshHermesMemoryPipeline', () => {
     })
 
     expect(result).toEqual({ memories_pulled: 0, bytes: 0 })
+  })
+
+  test('a missing memories dir yields zero, not a transport failure', async () => {
+    const missingDir = path.join(workDir, 'no-such-hermes-memories')
+    const cmd = buildRemoteMemoryCmd({
+      sinceMs: SINCE.getTime(),
+      memoryDir: missingDir,
+    })
+
+    const result = await runSshHermesMemoryPipeline({
+      upstream: ['sh', '-c', cmd],
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result).toEqual({ memories_pulled: 0, bytes: 0 })
+    expect(listFiles(dataDir)).toEqual([])
   })
 
   test('keeps a file whose mtime sits exactly on the inclusive since instant', async () => {

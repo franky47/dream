@@ -115,6 +115,50 @@ describe('parseConfig', () => {
     expect(result.remoteHermesHosts).toEqual(['echo', 'alpha'])
   })
 
+  test.each([
+    ['a/b', 'slash'],
+    ['a\\b', 'backslash'],
+    ['a b', 'whitespace'],
+    ['..', 'dot-dot'],
+    ['../evil', 'traversal'],
+    ['-oProxyCommand=x', 'leading dash'],
+  ])('rejects a hostile DREAM_REMOTE_HERMES_HOSTS entry (%s: %s)', (host) => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_HERMES_HOSTS: `echo,${host}`,
+    })
+    expect(result).toBeInstanceOf(ConfigError)
+  })
+
+  test('rejects hostile entries in DREAM_REMOTE_CLAUDE_HOSTS too', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_CLAUDE_HOSTS: '-oProxyCommand=x',
+    })
+    expect(result).toBeInstanceOf(ConfigError)
+  })
+
+  test('rejects hostile entries in DREAM_REMOTE_OPENCODE_HOSTS too', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_OPENCODE_HOSTS: 'a/../b',
+    })
+    expect(result).toBeInstanceOf(ConfigError)
+  })
+
+  test('accepts ordinary hostnames with dots, dashes, and user@host', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_HERMES_HOSTS: 'echo,box-1.example.com,user@host',
+    })
+    if (result instanceof Error) throw result
+    expect(result.remoteHermesHosts).toEqual([
+      'echo',
+      'box-1.example.com',
+      'user@host',
+    ])
+  })
+
   test('firefoxProfiles is empty when DREAM_FIREFOX_PROFILES is unset', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
     if (result instanceof Error) throw result
