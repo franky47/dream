@@ -1,7 +1,13 @@
+import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+
+import { Glob } from 'bun'
 import * as errore from 'errore'
 
 import { buildProjectionSql, splitJsonlToSessionFiles } from '#lib/hermes/pull'
 import { renderHermesSession } from '#lib/hermes/renderer'
+import { utcDay } from '#lib/utc-day'
 import type { Source } from '#src/ingest/orchestrator'
 
 const SOURCE = 'hermes'
@@ -9,6 +15,12 @@ const SOURCE = 'hermes'
 // where a leading `~` would stay literal but `$HOME` still expands to the
 // operator's home directory.
 const DEFAULT_REMOTE_DB_PATH = '$HOME/.hermes/state.db'
+const DEFAULT_REMOTE_MEMORY_DIR = '$HOME/.hermes'
+
+// Hermes keeps exactly two built-in memory files. Every other entry in the
+// memory directory (lock files, the state db, optional provider data) stays
+// out of the copy.
+const MEMORY_FILES: ReadonlySet<string> = new Set(['MEMORY.md', 'USER.md'])
 
 class SshSourceFailure extends errore.createTaggedError({
   name: 'SshSourceFailure',
@@ -20,11 +32,16 @@ function shellSingleQuote(s: string): string {
   return `'${s.replaceAll(`'`, `'\\''`)}'`
 }
 
-function quoteDbPath(dbPath: string): string {
+function quoteRemotePath(remotePath: string, defaultLiteral: string): string {
   // The default references `$HOME`, which must reach the remote shell
   // unquoted to expand. A caller-supplied path is shell-quoted literally.
-  if (dbPath === DEFAULT_REMOTE_DB_PATH) return dbPath
-  return shellSingleQuote(dbPath)
+  if (remotePath === defaultLiteral) return remotePath
+  return shellSingleQuote(remotePath)
+}
+
+function formatSinceForFind(d: Date): string {
+  const iso = d.toISOString()
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`
 }
 
 export function buildRemoteCmd(opts: {
@@ -37,7 +54,34 @@ export function buildRemoteCmd(opts: {
     sinceMs: opts.sinceMs,
     untilMs: opts.untilMs,
   })
-  return `sqlite3 -readonly ${quoteDbPath(dbPath)} ${shellSingleQuote(sql)}`
+  const quotedDbPath = quoteRemotePath(dbPath, DEFAULT_REMOTE_DB_PATH)
+  return `sqlite3 -readonly ${quotedDbPath} ${shellSingleQuote(sql)}`
+}
+
+// Only the two built-in memory files reach the tar stream: `-maxdepth 1` keeps
+// the search shallow so optional provider subdirectories stay untouched, and
+// `-newermt` bounds it below by the ingest window's since instant. `tar`
+// preserves each file's mtime so the pipeline can route by modification time.
+//
+// The leading `.` anchor plus `--no-recursion` keeps tar from the "cowardly
+// refusing to create an empty archive" failure when no memory file changed in
+// the window: the memory directory is archived as a bare directory entry (never
+// its contents, so the state db stays out) that the extraction side ignores.
+export function buildRemoteMemoryCmd(opts: {
+  sinceMs: number
+  memoryDir?: string
+}): string {
+  const memoryDir = opts.memoryDir ?? DEFAULT_REMOTE_MEMORY_DIR
+  const quotedDir = quoteRemotePath(memoryDir, DEFAULT_REMOTE_MEMORY_DIR)
+  const sinceStr = formatSinceForFind(new Date(opts.sinceMs))
+  return (
+    `cd ${quotedDir} && ` +
+    `{ printf '.\\0'; ` +
+    `find . -maxdepth 1 ` +
+    `\\( -name 'MEMORY.md' -o -name 'USER.md' \\) ` +
+    `-newermt '${sinceStr}' -print0; } ` +
+    `| tar --null --no-recursion -czf - -T -`
+  )
 }
 
 async function readAll(
@@ -131,24 +175,125 @@ export async function runSshHermesPipeline(opts: {
   return metrics
 }
 
+class SshMemoryFailure extends errore.createTaggedError({
+  name: 'SshMemoryFailure',
+  message:
+    'ssh+tar (memory) failed for $machine/$source (host=$host, ssh=$sshExit, tar=$tarExit): $stderr',
+}) {}
+
+// Extracts the ssh+tar stream into a temp dir, then keeps only the two built-in
+// memory files whose mtime falls inside the half-open [since, until) window and
+// copies each byte-for-byte into its modification day's `memories` bucket. This
+// mirrors the session projection's window bound and Codex's memory routing. The
+// remote `find` can only express the lower bound, so the strict `< until` upper
+// bound is enforced here.
+export async function runSshHermesMemoryPipeline(opts: {
+  upstream: string[]
+  dataDir: string
+  host: string
+  since: Date
+  until: Date
+}): Promise<{ memories_pulled: number; bytes: number }> {
+  const stageDir = await mkdtemp(path.join(tmpdir(), 'dream-ssh-hermes-mem-'))
+  try {
+    const ssh = Bun.spawn(opts.upstream, {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'ignore',
+    })
+    const tar = Bun.spawn(['tar', '-xzf', '-', '-C', stageDir], {
+      stdin: ssh.stdout,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    const [sshExit, tarExit, sshStderr, tarStderr] = await Promise.all([
+      ssh.exited,
+      tar.exited,
+      readAll(ssh.stderr),
+      readAll(tar.stderr),
+    ])
+
+    if (sshExit !== 0 || tarExit !== 0) {
+      const stderr = [sshStderr, tarStderr]
+        .filter((s) => s.trim().length > 0)
+        .join(' | ')
+        .slice(0, 500)
+        .trim()
+      throw new SshMemoryFailure({
+        machine: opts.host,
+        source: SOURCE,
+        host: opts.host,
+        sshExit,
+        tarExit,
+        stderr: stderr || '(no stderr captured)',
+      })
+    }
+
+    const sinceMs = opts.since.getTime()
+    const untilMs = opts.until.getTime()
+    const glob = new Glob('**/*')
+    let memoriesPulled = 0
+    let bytes = 0
+    for await (const rel of glob.scan({ cwd: stageDir, onlyFiles: true })) {
+      const name = path.basename(rel)
+      if (!MEMORY_FILES.has(name)) continue
+      const abs = path.join(stageDir, rel)
+      const info = await stat(abs)
+      if (info.mtimeMs < sinceMs || info.mtimeMs >= untilMs) continue
+      const dst = path.join(
+        opts.dataDir,
+        utcDay(new Date(info.mtimeMs)),
+        opts.host,
+        SOURCE,
+        'memories',
+        name,
+      )
+      await mkdir(path.dirname(dst), { recursive: true })
+      bytes += await Bun.write(dst, Bun.file(abs))
+      memoriesPulled += 1
+    }
+    return { memories_pulled: memoriesPulled, bytes }
+  } finally {
+    await rm(stageDir, { recursive: true, force: true })
+  }
+}
+
 export function ingestSshHermes(opts: { host: string }): Source {
   return {
     machine: opts.host,
     source: SOURCE,
-    pull: async ({ dataDir, since, until }) =>
-      runSshHermesPipeline({
-        upstream: [
-          'ssh',
-          '-o',
-          'BatchMode=yes',
-          opts.host,
-          buildRemoteCmd({
-            sinceMs: since.getTime(),
-            untilMs: until.getTime(),
-          }),
-        ],
-        dataDir,
-        host: opts.host,
-      }),
+    pull: async ({ dataDir, since, until }) => {
+      const sshBase = ['ssh', '-o', 'BatchMode=yes', opts.host]
+      const [sessions, memories] = await Promise.all([
+        runSshHermesPipeline({
+          upstream: [
+            ...sshBase,
+            buildRemoteCmd({
+              sinceMs: since.getTime(),
+              untilMs: until.getTime(),
+            }),
+          ],
+          dataDir,
+          host: opts.host,
+        }),
+        runSshHermesMemoryPipeline({
+          upstream: [
+            ...sshBase,
+            buildRemoteMemoryCmd({ sinceMs: since.getTime() }),
+          ],
+          dataDir,
+          host: opts.host,
+          since,
+          until,
+        }),
+      ])
+      return {
+        sessions_pulled: sessions.sessions_pulled,
+        messages_pulled: sessions.messages_pulled,
+        memories_pulled: memories.memories_pulled,
+        bytes: sessions.bytes + memories.bytes,
+      }
+    },
   }
 }
