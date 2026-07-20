@@ -81,7 +81,6 @@ export function normalize(jsonlText: string): NormalizedSession {
   const frontmatterYaml = frontmatterToYaml(extractFrontmatter(jsonlText))
 
   const messages: NormalizedMessage[] = []
-<<<<<<< HEAD
   const pending = new Map<string, ToolPart>()
   let currentAssistant: NormalizedMessage | null = null
 
