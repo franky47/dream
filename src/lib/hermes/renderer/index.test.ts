@@ -158,4 +158,66 @@ describe('renderHermesSession', () => {
     const md = renderHermesSession(jsonl([SESSION]))
     expect(md).not.toContain('archived:')
   })
+
+  test('renders a paired tool call with its bespoke shape', () => {
+    const md = renderHermesSession(
+      jsonl([
+        SESSION,
+        {
+          type: 'message',
+          id: 'msg_1',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'assistant',
+          content: JSON.stringify({
+            type: 'tool_call',
+            callId: 'c1',
+            name: 'terminal',
+            input: { command: 'ls' },
+          }),
+          createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_2',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'tool',
+          content: JSON.stringify({
+            type: 'tool_result',
+            callId: 'c1',
+            output: 'a\nb',
+          }),
+          createdAt: Date.UTC(2026, 4, 9, 12, 0, 30),
+        },
+      ]),
+    )
+
+    expect(md).toContain('<tool name="terminal" command="ls">')
+    expect(md).toContain('a\nb')
+  })
+
+  test('renders an unknown tool through the compact fallback', () => {
+    const md = renderHermesSession(
+      jsonl([
+        SESSION,
+        {
+          type: 'message',
+          id: 'msg_1',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'assistant',
+          content: JSON.stringify({
+            type: 'tool_call',
+            callId: 'c1',
+            name: 'browser',
+            input: { url: 'https://example.com' },
+          }),
+          createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
+        },
+      ]),
+    )
+
+    expect(md).toContain('<tool name="browser" url="https://example.com"/>')
+  })
 })

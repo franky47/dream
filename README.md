@@ -48,4 +48,12 @@ For Discord-sourced turns, the Markdown drops the fixed note Hermes injects to
 tell its reply tool which message triggered the run. Sender, reply and
 attachment context stay in place, and the raw JSONL keeps the stored text as-is.
 
+Tool calls render in a Hermes-specific style. The renderer pairs each tool
+call with its result by call id and gives terminal, read, write, patch,
+search, todo and clarify their own concise shapes: terminal and patch keep
+their command, status and diff, while a write keeps its file statistics
+instead of the whole payload. Any other tool falls back to a compact
+self-closing `<tool>` tag, so a new Hermes tool never breaks the render. A
+failed tool carries an `error="1"` marker.
+
 This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
