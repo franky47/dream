@@ -39,6 +39,17 @@ A session with no compaction also yields one Markdown file. A session compacted
 once in place splits into two context-window fragments, `<id>.1.md` and
 `<id>.2.md`.
 
+When Hermes rotates a session, it opens a fresh session that begins with a
+compaction summary and points back to the one it continues. The source joins a
+root and its rotated continuations into one logical session under the root's
+UUID: the JSONL keeps every physical session id, parent link and source in chain
+order, and the Markdown renders one context-window fragment per rotation, just
+like an in-place compaction. Selection, day routing, archive state and metrics
+follow the joined conversation, so its latest message across all rotations
+decides which window and day it lands in. A user-created branch opens with an
+ordinary turn rather than a summary, so it stays its own session; a continuation
+whose parent is missing stands on its own rather than disappearing.
+
 Each fragment carries its own frontmatter (times, turns and tool counts for that
 window) plus a `contextWindow` number; the first also names its
 `nextContextWindow` and ends with a relative Markdown link to the second. The

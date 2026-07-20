@@ -510,3 +510,254 @@ describe('projectRows', () => {
     db.close()
   })
 })
+
+const SUMMARY_CONTENT =
+  '[hermes:compaction-summary]\nEarlier we did X.\n[/hermes:compaction-summary]'
+
+function logicalIds(rows: Record<string, unknown>[]): unknown[] {
+  return rows.filter((r) => r.type === 'session').map((r) => r.logicalId)
+}
+
+function physicalIds(rows: Record<string, unknown>[]): unknown[] {
+  return rows.filter((r) => r.type === 'session').map((r) => r.id)
+}
+
+describe('rotated continuation chains', () => {
+  test('joins a continuation under its root as one logical session', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_root', source: 'discord', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_root',
+      sessionId: 'ses_root',
+      content: 'first question',
+      createdAt: 6_000,
+    })
+    insertSession(db, {
+      id: 'ses_cont',
+      source: 'discord',
+      parentId: 'ses_root',
+      createdAt: 7_000,
+    })
+    insertMessage(db, {
+      id: 'msg_summary',
+      sessionId: 'ses_cont',
+      role: 'assistant',
+      content: SUMMARY_CONTENT,
+      createdAt: 7_000,
+    })
+    insertMessage(db, {
+      id: 'msg_after',
+      sessionId: 'ses_cont',
+      content: 'follow-up',
+      createdAt: 8_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    // Both physical sessions survive, joined under the root's logical id.
+    expect(physicalIds(rows)).toEqual(['ses_root', 'ses_cont'])
+    expect(logicalIds(rows)).toEqual(['ses_root', 'ses_root'])
+
+    // Root header comes first, its message before the continuation, and the
+    // continuation keeps its own parent link.
+    expect(rows.map((r) => r.id)).toEqual([
+      'ses_root',
+      'msg_root',
+      'ses_cont',
+      'msg_summary',
+      'msg_after',
+    ])
+    const cont = rows.find((r) => r.id === 'ses_cont')
+    expect(cont?.parentId).toBe('ses_root')
+    db.close()
+  })
+
+  test('joins several continuations in chain order', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_root', source: 'cli', createdAt: 1_000 })
+    insertMessage(db, {
+      id: 'm_root',
+      sessionId: 'ses_root',
+      createdAt: 1_500,
+    })
+    insertSession(db, {
+      id: 'ses_c1',
+      source: 'cli',
+      parentId: 'ses_root',
+      createdAt: 2_000,
+    })
+    insertMessage(db, {
+      id: 'm_c1',
+      sessionId: 'ses_c1',
+      role: 'assistant',
+      content: SUMMARY_CONTENT,
+      createdAt: 2_000,
+    })
+    insertSession(db, {
+      id: 'ses_c2',
+      source: 'cli',
+      parentId: 'ses_c1',
+      createdAt: 3_000,
+    })
+    insertMessage(db, {
+      id: 'm_c2',
+      sessionId: 'ses_c2',
+      role: 'assistant',
+      content: SUMMARY_CONTENT,
+      createdAt: 3_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    expect(physicalIds(rows)).toEqual(['ses_root', 'ses_c1', 'ses_c2'])
+    expect(logicalIds(rows)).toEqual(['ses_root', 'ses_root', 'ses_root'])
+    db.close()
+  })
+
+  test('selects a chain by its logical latest even when the root is stale', () => {
+    const db = openFreshDb()
+    // The root's own newest message predates the window; only the continuation
+    // is recent. The joined session must still be pulled whole.
+    insertSession(db, { id: 'ses_root', source: 'discord', createdAt: 100 })
+    insertMessage(db, {
+      id: 'msg_root',
+      sessionId: 'ses_root',
+      content: 'old question',
+      createdAt: 500,
+    })
+    insertSession(db, {
+      id: 'ses_cont',
+      source: 'discord',
+      parentId: 'ses_root',
+      createdAt: 5_000,
+    })
+    insertMessage(db, {
+      id: 'msg_summary',
+      sessionId: 'ses_cont',
+      role: 'assistant',
+      content: SUMMARY_CONTENT,
+      createdAt: 5_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 1_000, untilMs: 9_000 }))
+
+    expect(physicalIds(rows)).toEqual(['ses_root', 'ses_cont'])
+    const header = rows.find((r) => r.id === 'ses_root')
+    expect(header?.latestMessageTime).toBe(5_000)
+    db.close()
+  })
+
+  test('excludes a chain whose logical latest is beyond the window', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_root', source: 'discord', createdAt: 100 })
+    insertMessage(db, {
+      id: 'msg_root',
+      sessionId: 'ses_root',
+      createdAt: 500,
+    })
+    insertSession(db, {
+      id: 'ses_cont',
+      source: 'discord',
+      parentId: 'ses_root',
+      createdAt: 9_000,
+    })
+    insertMessage(db, {
+      id: 'msg_summary',
+      sessionId: 'ses_cont',
+      role: 'assistant',
+      content: SUMMARY_CONTENT,
+      createdAt: 9_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 1_000, untilMs: 5_000 }))
+    expect(rows).toHaveLength(0)
+    db.close()
+  })
+
+  test('does not join a user branch that opens with an ordinary turn', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_root', source: 'discord', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_root',
+      sessionId: 'ses_root',
+      createdAt: 6_000,
+    })
+    insertSession(db, {
+      id: 'ses_branch',
+      source: 'discord',
+      parentId: 'ses_root',
+      createdAt: 6_000,
+    })
+    insertMessage(db, {
+      id: 'msg_branch',
+      sessionId: 'ses_branch',
+      content: 'a fresh human question',
+      createdAt: 7_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    // Two separate logical sessions, each its own root.
+    const ids = logicalIds(rows)
+    expect(ids).toHaveLength(2)
+    expect(ids).toContain('ses_root')
+    expect(ids).toContain('ses_branch')
+    db.close()
+  })
+
+  test('does not join a subagent that opens with a compaction-like message', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_root', source: 'cli', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_root',
+      sessionId: 'ses_root',
+      createdAt: 6_000,
+    })
+    insertSession(db, {
+      id: 'ses_sub',
+      source: 'subagent',
+      parentId: 'ses_root',
+      createdAt: 6_000,
+    })
+    insertMessage(db, {
+      id: 'msg_sub',
+      sessionId: 'ses_sub',
+      role: 'assistant',
+      content: SUMMARY_CONTENT,
+      createdAt: 7_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    expect(physicalIds(rows)).toEqual(['ses_root'])
+    expect(logicalIds(rows)).toEqual(['ses_root'])
+    db.close()
+  })
+
+  test('self-roots a continuation whose parent link is broken', () => {
+    const db = openFreshDb()
+    // The parent session is missing, so the orphan cannot vanish: it becomes
+    // its own logical session.
+    insertSession(db, {
+      id: 'ses_orphan',
+      source: 'discord',
+      parentId: 'ses_missing',
+      createdAt: 5_000,
+    })
+    insertMessage(db, {
+      id: 'msg_summary',
+      sessionId: 'ses_orphan',
+      role: 'assistant',
+      content: SUMMARY_CONTENT,
+      createdAt: 6_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    expect(physicalIds(rows)).toEqual(['ses_orphan'])
+    expect(logicalIds(rows)).toEqual(['ses_orphan'])
+    const header = rows.find((r) => r.id === 'ses_orphan')
+    expect(header?.parentId).toBe('ses_missing')
+    db.close()
+  })
+})

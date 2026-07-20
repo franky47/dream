@@ -173,32 +173,37 @@ function collectMessages(raws: readonly unknown[]): MessageRow[] {
 
 // A logical Hermes session becomes one fragment per context window. Without a
 // compaction it stays a single unnumbered file, byte-identical to the basic
-// renderer. One in-place compaction yields two fragments: the archived
-// conversation, then the summary plus the tail Hermes preserved.
+// renderer. Each compaction summary opens a new window: an in-place compaction
+// marks its summary mid-stream, while a rotated continuation carries its
+// summary as the first message of the next physical session. Both forms join
+// into one message stream here, so each summary starts a window that shows the
+// summary plus the tail it preserved. A leading archived window precedes them
+// only when real turns come before the first summary; an orphaned continuation
+// whose stream opens with a summary skips that empty window.
 export function renderHermesFragments(jsonlText: string): HermesFragment[] {
   const raws = parseRows(jsonlText)
   const session = firstSession(raws)
   const messages = collectMessages(raws)
-  const summaryIndex = messages.findIndex((m) => isCompactionSummary(m.content))
+  const summaryIndices = messages
+    .map((m, i) => (isCompactionSummary(m.content) ? i : -1))
+    .filter((i) => i !== -1)
 
-  if (session === null || summaryIndex === -1) {
+  if (session === null || summaryIndices.length === 0) {
     return [{ contextWindow: null, markdown: renderHermesSession(jsonlText) }]
   }
 
-  return [
-    renderWindow({
+  const hasLeadingArchive = summaryIndices[0] !== 0
+  const starts = hasLeadingArchive ? [0, ...summaryIndices] : summaryIndices
+  return starts.map((start, w) => {
+    const isSummaryWindow = w > 0 || !hasLeadingArchive
+    const contextWindow = w + 1
+    return renderWindow({
       session,
-      summary: null,
-      turns: messages.slice(0, summaryIndex),
-      contextWindow: 1,
-      nextContextWindow: 2,
-    }),
-    renderWindow({
-      session,
-      summary: messages[summaryIndex]!,
-      turns: messages.slice(summaryIndex + 1),
-      contextWindow: 2,
-      nextContextWindow: null,
-    }),
-  ]
+      summary: isSummaryWindow ? messages[start]! : null,
+      turns: messages.slice(isSummaryWindow ? start + 1 : start, starts[w + 1]),
+      contextWindow,
+      nextContextWindow:
+        contextWindow < starts.length ? contextWindow + 1 : null,
+    })
+  })
 }

@@ -74,6 +74,57 @@ describe('splitJsonlToSessionFiles', () => {
     expect(content.trim().split('\n')).toHaveLength(3)
   })
 
+  test('joins a rotated chain into one file named for the root uuid', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_root',
+        sessionId: 'ses_root',
+        logicalId: 'ses_root',
+        latestMessageTime: DAY2_MS,
+      }),
+      JSON.stringify({
+        type: 'message',
+        id: 'msg_root',
+        sessionId: 'ses_root',
+        logicalId: 'ses_root',
+      }),
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_cont',
+        sessionId: 'ses_cont',
+        logicalId: 'ses_root',
+        latestMessageTime: DAY2_MS,
+      }),
+      JSON.stringify({
+        type: 'message',
+        id: 'msg_cont',
+        sessionId: 'ses_cont',
+        logicalId: 'ses_root',
+      }),
+    ]
+
+    const metrics = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    })
+
+    // One file, named for the root, routed by the logical latest message.
+    expect(readdirSync(bucket(DAY2)).sort()).toEqual(['ses_root.jsonl'])
+    // The joined session counts once; both physical members' rows are kept.
+    expect(metrics.sessions_pulled).toBe(1)
+    expect(metrics.messages_pulled).toBe(2)
+    expect(metrics.sessionPaths).toHaveLength(1)
+
+    const content = readFileSync(
+      path.join(bucket(DAY2), 'ses_root.jsonl'),
+      'utf-8',
+    )
+    expect(content.trim().split('\n')).toHaveLength(4)
+    expect(content).toContain('"id":"ses_cont"')
+  })
+
   test('fails with source context on a malformed row', async () => {
     const lines = [
       JSON.stringify({ type: 'session', sessionId: 'ses_a' }), // missing latestMessageTime

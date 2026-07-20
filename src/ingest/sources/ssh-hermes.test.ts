@@ -203,6 +203,75 @@ describe('runSshHermesPipeline', () => {
     expect(two).not.toContain('Safety prefix')
   })
 
+  test('joins a rotated chain into one root file with numbered fragments', async () => {
+    const summary =
+      '[hermes:compaction-summary]\nWe planned the refactor.\n' +
+      '[/hermes:compaction-summary]'
+    const chained = (
+      obj: Record<string, unknown>,
+    ): Record<string, unknown> => ({ ...obj, logicalId: 'ses_root' })
+    const fixturePath = path.join(workDir, 'fixture.jsonl')
+    writeFileSync(
+      fixturePath,
+      [
+        JSON.stringify(chained(JSON.parse(sessionLine('ses_root', DAY1_MS)))),
+        JSON.stringify(
+          chained(JSON.parse(messageLine('m1', 'ses_root', DAY1_MS))),
+        ),
+        JSON.stringify(
+          chained({
+            type: 'session',
+            id: 'ses_cont',
+            sessionId: 'ses_cont',
+            source: 'discord',
+            title: 'ses_cont',
+            parentId: 'ses_root',
+            createdAt: DAY1_MS + 1_000,
+            latestMessageTime: DAY1_MS,
+          }),
+        ),
+        JSON.stringify(
+          chained({
+            type: 'message',
+            id: 'm2',
+            sessionId: 'ses_cont',
+            turn: 1,
+            role: 'assistant',
+            content: summary,
+            createdAt: DAY1_MS + 1_000,
+          }),
+        ),
+        JSON.stringify(
+          chained(JSON.parse(messageLine('m3', 'ses_cont', DAY1_MS + 2_000))),
+        ),
+      ].join('\n') + '\n',
+    )
+
+    const result = await runSshHermesPipeline({
+      upstream: ['cat', fixturePath],
+      dataDir,
+      host: 'echo',
+    })
+
+    // One logical session: a single root-named jsonl plus two numbered
+    // fragments named for the root uuid, no per-physical files.
+    expect(listFiles(dataDir)).toEqual([
+      `${DAY1}/echo/hermes/ses_root.1.md`,
+      `${DAY1}/echo/hermes/ses_root.2.md`,
+      `${DAY1}/echo/hermes/ses_root.jsonl`,
+    ])
+    expect(result.sessions_pulled).toBe(1)
+
+    // Raw JSONL retains every physical session id in chain order.
+    const raw = readFileSync(path.join(bucket(DAY1), 'ses_root.jsonl'), 'utf-8')
+    expect(raw).toContain('"id":"ses_root"')
+    expect(raw).toContain('"id":"ses_cont"')
+
+    const two = readFileSync(path.join(bucket(DAY1), 'ses_root.2.md'), 'utf-8')
+    expect(two).toContain('<compaction')
+    expect(two).toContain('We planned the refactor.')
+  })
+
   test('leaves snapshots in unrelated day buckets untouched', async () => {
     const priorDir = path.join(dataDir, '2026-05-01', 'echo', 'hermes')
     mkdirSync(priorDir, { recursive: true })
