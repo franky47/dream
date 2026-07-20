@@ -8,6 +8,7 @@ import type {
 } from '#lib/renderer/types'
 
 import { extractFrontmatter, frontmatterToYaml } from './frontmatter.ts'
+import { isRewound } from './rewound.ts'
 
 const messageRowSchema = z.object({
   type: z.literal('message'),
@@ -35,6 +36,7 @@ export function normalize(jsonlText: string): NormalizedSession {
 
   const messages: NormalizedMessage[] = []
   for (const raw of raws) {
+    if (isRewound(raw)) continue
     const msg = messageRowSchema.safeParse(raw)
     if (!msg.success) continue
     const parts: Part[] =

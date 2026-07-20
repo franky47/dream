@@ -15,6 +15,11 @@ import type { Database } from 'bun:sqlite'
 // JSON rather than an escaped string. The Markdown renderer omits the noisy
 // ones (system prompt, model settings, reasoning) while keeping the archive
 // complete.
+//
+// Inactive rows stay in the projection too. A `/undo` withdraws a turn from the
+// live conversation but the row keeps its place in the archive, carrying its
+// `active` state so the Markdown renderer can drop it while the raw record
+// retains Hermes' audit trail.
 function eligibleSessionsCte(
   sinceLiteral: string,
   untilLiteral: string,
@@ -77,6 +82,7 @@ function projectionSqlTemplate(
           'role', m.role,
           'content', m.content,
           'createdAt', m.created_at,
+          'active', m.active,
           'reasoning', m.reasoning,
           'metadata', json(m.metadata)
         ) AS row,

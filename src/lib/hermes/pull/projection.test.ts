@@ -38,6 +38,7 @@ const SCHEMA_STATEMENTS = [
     turn INTEGER NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 1,
     reasoning TEXT,
     metadata TEXT,
     created_at INTEGER NOT NULL
@@ -94,6 +95,7 @@ function insertMessage(
     turn?: number
     role?: string
     content?: string
+    active?: number
     reasoning?: string | null
     metadata?: string | null
     createdAt: number
@@ -101,14 +103,15 @@ function insertMessage(
 ): void {
   db.prepare(
     `INSERT INTO messages
-       (id, session_id, turn, role, content, reasoning, metadata, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, session_id, turn, role, content, active, reasoning, metadata, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     m.id,
     m.sessionId,
     m.turn ?? 1,
     m.role ?? 'user',
     m.content ?? 'hello',
+    m.active ?? 1,
     m.reasoning ?? null,
     m.metadata ?? null,
     m.createdAt,
@@ -330,6 +333,36 @@ describe('projectRows', () => {
       finishReason: 'stop',
       providerId: 'echo',
     })
+    db.close()
+  })
+
+  test('retains rewound (inactive) rows carrying their active state', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_1', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_live',
+      sessionId: 'ses_1',
+      content: 'kept in the live conversation',
+      active: 1,
+      createdAt: 6_000,
+    })
+    insertMessage(db, {
+      id: 'msg_rewound',
+      sessionId: 'ses_1',
+      content: 'withdrawn with /undo',
+      active: 0,
+      createdAt: 7_000,
+    })
+
+    const messages = parseRows(
+      projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }),
+    ).filter((r) => r.type === 'message')
+
+    expect(messages).toHaveLength(2)
+    expect(messages[0]?.active).toBe(1)
+    expect(messages[1]?.id).toBe('msg_rewound')
+    expect(messages[1]?.active).toBe(0)
+    expect(messages[1]?.content).toBe('withdrawn with /undo')
     db.close()
   })
 
