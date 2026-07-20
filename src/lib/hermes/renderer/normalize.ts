@@ -37,17 +37,22 @@ const messageRowSchema = z.object({
   toolCalls: z.array(toolCallSchema).nullish(),
   toolCallId: z.string().nullish(),
   toolName: z.string().nullish(),
+  apiContent: z.string().nullish(),
 })
 
 type MessageRow = z.infer<typeof messageRowSchema>
 
-// A tool result row carries a JSON object such as `{"output":"..."}` or
-// `{"success":true,...}`. Read `output` when present; otherwise keep the whole
-// object so nothing is lost. `success:false` marks the call as failed.
+// A tool result row carries a JSON object. A terminal run stores
+// `{output, exit_code, error}` (extra keys such as `approval` may ride along);
+// other tools store their own scalar keys. Read `output` when present; otherwise
+// keep the whole object so nothing is lost. A run failed when its `exit_code` is
+// non-zero or its `error` field is non-null — the old `success:false` flag never
+// appears on real rows.
 const resultObjectSchema = z
   .object({
     output: z.string().optional(),
-    success: z.boolean().optional(),
+    exit_code: z.number().optional(),
+    error: z.string().nullish(),
   })
   .loose()
 
@@ -89,6 +94,13 @@ function toToolPart(call: z.infer<typeof toolCallSchema>): ToolPart | null {
   return { kind: 'tool', id, name, input: parseArguments(call.function) }
 }
 
+function isResultFailure(data: z.infer<typeof resultObjectSchema>): boolean {
+  const failedExit = data.exit_code !== undefined && data.exit_code !== 0
+  // A real success row carries `error: null`; an empty string is not a failure.
+  const hasError = data.error != null && data.error.length > 0
+  return failedExit || hasError
+}
+
 function toToolResult(content: string): ToolResult {
   let parsed: unknown
   try {
@@ -101,9 +113,27 @@ function toToolResult(content: string): ToolResult {
   const output = object.data.output ?? JSON.stringify(parsed)
   return {
     content: output,
-    isError: object.data.success === false,
+    isError: isResultFailure(object.data),
     details: parsed,
   }
+}
+
+// A projected tool-result row usually carries its payload in `content`. When
+// `content` is null the payload may live in the projected `apiContent` field, but
+// only a value that parses to a JSON object (the verified result envelope) is
+// treated as a result; anything else keeps dropping.
+function resolveResultPayload(row: MessageRow): string | null {
+  if (row.content != null) return row.content
+  if (row.apiContent == null) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.apiContent)
+  } catch {
+    return null
+  }
+  const isPlainObject =
+    typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+  return isPlainObject ? row.apiContent : null
 }
 
 export function normalize(jsonlText: string): NormalizedSession {
@@ -124,10 +154,12 @@ export function normalizeMessages(
   const pending = new Map<string, ToolPart>()
 
   const attachResult = (row: MessageRow): void => {
-    if (row.toolCallId == null || row.content == null) return
+    if (row.toolCallId == null) return
     const part = pending.get(row.toolCallId)
     if (part === undefined) return
-    part.result = toToolResult(row.content)
+    const payload = resolveResultPayload(row)
+    if (payload === null) return
+    part.result = toToolResult(payload)
   }
 
   const addRow = (role: Role, row: MessageRow): void => {

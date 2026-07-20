@@ -29,9 +29,26 @@ function trimBlankEdges(lines: readonly string[]): string[] {
   return lines.slice(start, end)
 }
 
+// Hermes prepends the note as the leading framing of the stored text, so only a
+// leading run of notes (and the blank lines around them) is framing. A note that
+// appears later is quoted content the human typed, so it stays untouched.
 export function stripDiscordTriggerNote(content: string): string {
   const lines = content.split('\n')
-  const kept = lines.filter((line) => !isTriggerNote(line))
-  if (kept.length === lines.length) return content
-  return trimBlankEdges(kept).join('\n')
+  let start = 0
+  let removed = false
+  while (start < lines.length) {
+    const line = lines[start]!
+    if (isTriggerNote(line)) {
+      removed = true
+      start += 1
+      continue
+    }
+    if (line.trim() === '') {
+      start += 1
+      continue
+    }
+    break
+  }
+  if (!removed) return content
+  return trimBlankEdges(lines.slice(start)).join('\n')
 }

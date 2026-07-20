@@ -44,8 +44,19 @@ const messageRowSchema = z.object({
   createdAt: z.number(),
 })
 
-type SessionRow = z.infer<typeof sessionRowSchema>
 type MessageRow = z.infer<typeof messageRowSchema>
+
+// A joined logical session carries several physical session headers. Frontmatter
+// describes the joined whole, not the first physical row: it keeps the root's
+// id/source/title, folds the platform IDs of every member (root first, later
+// members only fill gaps), and marks the whole archived if any member is.
+interface MergedSession {
+  sessionId: string
+  source: string
+  title: string
+  archived: boolean
+  platform: Frontmatter['platform']
+}
 
 interface MessageEntry {
   raw: unknown
@@ -59,7 +70,7 @@ export interface HermesFragment {
 }
 
 interface WindowSpec {
-  session: SessionRow
+  session: MergedSession
   summary: MessageEntry | null
   windowEntries: readonly MessageEntry[]
   bodyMessages: readonly NormalizedMessage[]
@@ -107,13 +118,17 @@ function collapseBlankLines(text: string): string {
   return text.replaceAll(BLANK_LINE_RUN, `${NEWLINE}${NEWLINE}`)
 }
 
+// The compaction block is the first turn of its window: it takes turn number 1
+// and the window's relative-time origin (t="0"), so the body turns that follow
+// it number from 2 and clock from the summary's timestamp.
 function renderCompactionBlock(summary: MessageRow): string {
   const body = cleanSummaryBody(summary.content ?? '')
-  return `<compaction role="${summary.role}" t="0">\n${body}\n</compaction>`
+  return `<compaction n="1" role="${summary.role}" t="0">\n${body}\n</compaction>`
 }
 
 function renderWindowBody(spec: WindowSpec): string {
   const lines: string[] = []
+  const hasSummary = spec.summary !== null
   if (spec.summary !== null) {
     lines.push(renderCompactionBlock(spec.summary.row))
   }
@@ -123,6 +138,7 @@ function renderWindowBody(spec: WindowSpec): string {
     spec.bodyMessages,
     hermesRenderConfig,
     anchorMs,
+    hasSummary ? 2 : 1,
   )
   if (turns.length > 0) lines.push(turns)
 
@@ -163,13 +179,16 @@ function buildWindowFrontmatter(spec: WindowSpec): Frontmatter {
     sessionId: spec.session.sessionId,
     source: spec.session.source ?? '',
     title: spec.session.title ?? '',
-    archived: (spec.session.archived ?? 0) > 0,
+    archived: spec.session.archived,
     startedAt,
     endedAt,
-    turns: spec.bodyMessages.filter((m) => m.role === 'user').length,
+    // The compaction summary is the window's first (user) turn, so count it.
+    turns:
+      spec.bodyMessages.filter((m) => m.role === 'user').length +
+      (spec.summary === null ? 0 : 1),
     tools: countTools(spec.bodyMessages),
     contextWindow: spec.contextWindow,
-    platform: scalarPlatformFields(spec.session.platform),
+    platform: spec.session.platform,
     renderer: RENDERER_VERSION,
   }
   if (spec.nextContextWindow !== null) {
@@ -183,12 +202,34 @@ function renderWindow(spec: WindowSpec): HermesFragment {
   return { contextWindow: spec.contextWindow, markdown }
 }
 
-function firstSession(raws: readonly unknown[]): SessionRow | null {
-  for (const raw of raws) {
-    const parsed = sessionRowSchema.safeParse(raw)
-    if (parsed.success) return parsed.data
+function firstNonEmpty(values: readonly string[]): string {
+  return values.find((v) => v.length > 0) ?? ''
+}
+
+function mergeSessions(raws: readonly unknown[]): MergedSession | null {
+  const sessions = raws
+    .map((raw) => sessionRowSchema.safeParse(raw))
+    .filter((parsed) => parsed.success)
+    .map((parsed) => parsed.data)
+  const root = sessions[0]
+  if (root === undefined) return null
+
+  const platform: Frontmatter['platform'] = {}
+  for (const session of sessions) {
+    for (const [key, value] of Object.entries(
+      scalarPlatformFields(session.platform),
+    )) {
+      if (!(key in platform)) platform[key] = value
+    }
   }
-  return null
+
+  return {
+    sessionId: root.sessionId,
+    source: firstNonEmpty(sessions.map((s) => s.source ?? '')),
+    title: firstNonEmpty(sessions.map((s) => s.title ?? '')),
+    archived: sessions.some((s) => (s.archived ?? 0) > 0),
+    platform,
+  }
 }
 
 // Live message rows in order, each tagged with whether it opens a context
@@ -238,7 +279,7 @@ function summaryPositions(entries: readonly MessageEntry[]): number[] {
 // next-window link are fragment-level concerns.
 export function renderHermesFragments(jsonlText: string): HermesFragment[] {
   const raws = parseRows(jsonlText)
-  const session = firstSession(raws)
+  const session = mergeSessions(raws)
   const entries = collectEntries(raws)
   const summaries = summaryPositions(entries)
 

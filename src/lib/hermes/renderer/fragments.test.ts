@@ -171,7 +171,8 @@ describe('renderHermesFragments', () => {
     expect(two?.markdown).toContain(
       `endedAt: ${new Date(min(7)).toISOString()}`,
     )
-    expect(two?.markdown).toContain('turns: 2')
+    // Two body user turns plus the compaction summary, which is the first turn.
+    expect(two?.markdown).toContain('turns: 3')
   })
 
   test('first fragment ends with a relative link to the second', () => {
@@ -184,8 +185,14 @@ describe('renderHermesFragments', () => {
     const [, two] = renderHermesFragments(compactedSession())
     const afterFrontmatter = two?.markdown.split('---\n')[2] ?? ''
     expect(afterFrontmatter.trimStart().startsWith('<compaction')).toBe(true)
-    expect(two?.markdown).toContain('<compaction role="user" t="0">')
+    expect(two?.markdown).toContain('<compaction n="1" role="user" t="0">')
     expect(two?.markdown).toContain(SUMMARY_BODY)
+  })
+
+  test('numbers body turns from 2 after the compaction first turn', () => {
+    const [, two] = renderHermesFragments(compactedSession())
+    expect(two?.markdown).toContain('<compaction n="1" role="user" t="0">')
+    expect(two?.markdown).toContain('<turn n="2" role="user"')
   })
 
   test('compaction block drops the instruction prefix and end marker', () => {
@@ -300,6 +307,42 @@ describe('renderHermesFragments', () => {
     const [one, two] = renderHermesFragments(joinedChain())
     expect(one?.markdown.trimEnd().endsWith('](./ses_root.2.md)')).toBe(true)
     expect(two?.markdown.trimEnd().endsWith('](./ses_root.3.md)')).toBe(true)
+  })
+
+  test('marks every window archived when any chain member is archived', () => {
+    const fragments = renderHermesFragments(
+      jsonl([
+        {
+          ...SESSION,
+          id: 'ses_root',
+          sessionId: 'ses_root',
+          logicalId: 'ses_root',
+          archived: 0,
+          platform: { channelId: '111' },
+        },
+        chainMsg('r1', 'ses_root', 'user', 'Question one', min(0)),
+        chainMsg('r2', 'ses_root', 'assistant', 'Answer one', min(1)),
+        {
+          type: 'session',
+          id: 'ses_c1',
+          sessionId: 'ses_c1',
+          logicalId: 'ses_root',
+          parentId: 'ses_root',
+          archived: 1,
+          platform: { threadId: '222' },
+          createdAt: min(2),
+        },
+        chainMsg('c1s', 'ses_c1', 'user', SUMMARY_CONTENT, min(2)),
+        chainMsg('c1a', 'ses_c1', 'user', 'Question two', min(3)),
+      ]),
+    )
+
+    for (const fragment of fragments) {
+      expect(fragment.markdown).toContain('archived: true')
+      // Platform IDs from every physical member fold into each window.
+      expect(fragment.markdown).toContain('channelId: "111"')
+      expect(fragment.markdown).toContain('threadId: "222"')
+    }
   })
 
   test('a stream that opens with a summary skips the empty archived window', () => {
@@ -538,9 +581,11 @@ describe('renderHermesFragments with several compactions', () => {
 
   test('per-window user-turn counts describe each window', () => {
     const [one, two, three] = renderHermesFragments(twiceCompactedSession())
+    // Window one is archived with one user turn; each later window adds its
+    // compaction summary as a first turn on top of its single body user turn.
     expect(one?.markdown).toContain('turns: 1')
-    expect(two?.markdown).toContain('turns: 1')
-    expect(three?.markdown).toContain('turns: 1')
+    expect(two?.markdown).toContain('turns: 2')
+    expect(three?.markdown).toContain('turns: 2')
   })
 })
 
