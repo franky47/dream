@@ -348,9 +348,12 @@ describe('buildRemoteMemoryCmd', () => {
     expect(cmd).toContain('--no-recursion')
   })
 
-  test('bounds the search below by the since instant', () => {
+  test('backs the strictly-newer bound off one second below the since instant', () => {
+    // `find -newermt` is strictly-newer, so the bound sits one second below
+    // `since`; a file whose mtime equals the whole-second `since` instant then
+    // survives the remote pass and the inclusive local filter decides.
     const cmd = buildRemoteMemoryCmd({ sinceMs: DAY1_MS })
-    expect(cmd).toContain(`-newermt '2026-05-09 12:00:00 UTC'`)
+    expect(cmd).toContain(`-newermt '2026-05-09 11:59:59 UTC'`)
   })
 
   test('leaves the default $HOME memory dir unquoted so the shell expands it', () => {
@@ -491,6 +494,26 @@ describe('runSshHermesMemoryPipeline', () => {
     })
 
     expect(result).toEqual({ memories_pulled: 0, bytes: 0 })
+  })
+
+  test('keeps a file whose mtime sits exactly on the inclusive since instant', async () => {
+    const dir = writeMemoryFixture([
+      {
+        name: 'MEMORY.md',
+        content: 'right on since\n',
+        mtimeMs: SINCE.getTime(),
+      },
+    ])
+
+    const result = await runSshHermesMemoryPipeline({
+      upstream: tarUpstream(dir, ['MEMORY.md']),
+      dataDir,
+      host: 'echo',
+      since: SINCE,
+      until: UNTIL,
+    })
+
+    expect(result.memories_pulled).toBe(1)
   })
 
   test('excludes files modified outside the half-open window', async () => {

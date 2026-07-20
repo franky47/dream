@@ -44,6 +44,13 @@ function formatSinceForFind(d: Date): string {
   return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`
 }
 
+// Remote `find -newermt` is strictly-newer and only resolves whole seconds,
+// but the window contract is inclusive at `since`. Back the remote bound off by
+// one second so a memory file whose mtime lands exactly on the whole-second
+// `since` instant still reaches the tar stream; the authoritative local
+// `mtimeMs >= sinceMs` filter then decides what to keep.
+const FIND_OVER_INCLUSIVE_MS = 1000
+
 export function buildRemoteCmd(opts: {
   sinceMs: number
   untilMs: number
@@ -73,7 +80,9 @@ export function buildRemoteMemoryCmd(opts: {
 }): string {
   const memoryDir = opts.memoryDir ?? DEFAULT_REMOTE_MEMORY_DIR
   const quotedDir = quoteRemotePath(memoryDir, DEFAULT_REMOTE_MEMORY_DIR)
-  const sinceStr = formatSinceForFind(new Date(opts.sinceMs))
+  const sinceStr = formatSinceForFind(
+    new Date(opts.sinceMs - FIND_OVER_INCLUSIVE_MS),
+  )
   return (
     `cd ${quotedDir} && ` +
     `{ printf '.\\0'; ` +

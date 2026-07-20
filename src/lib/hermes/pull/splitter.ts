@@ -1,6 +1,7 @@
 import { mkdir, open, type FileHandle } from 'node:fs/promises'
 import path from 'node:path'
 
+import * as errore from 'errore'
 import { z } from 'zod'
 
 import { utcDay } from '#lib/utc-day'
@@ -33,6 +34,19 @@ const sessionHeaderSchema = z.object({
   latestMessageTime: z.number(),
 })
 
+// The renderer only keeps message rows whose `role`, `content` and `createdAt`
+// carry usable values; anything else it silently drops. Validating those fields
+// here, at the ingest gate, turns a would-be silent omission into a loud
+// failure and keeps `messages_pulled` honest. `content` is `NOT NULL` in the
+// state db, but a NULL would project as `"content":null`, which the string
+// requirement rejects rather than writing a half-empty transcript.
+const messageRowSchema = z.object({
+  type: z.literal('message'),
+  role: z.string(),
+  content: z.string(),
+  createdAt: z.number(),
+})
+
 function logicalKey(env: { sessionId: string; logicalId?: string }): string {
   return env.logicalId ?? env.sessionId
 }
@@ -42,7 +56,12 @@ class HermesRowInvalid extends Error {
 }
 
 function parseLine<T>(schema: z.ZodType<T>, line: string, context: string): T {
-  const parsed: unknown = JSON.parse(line)
+  const parsed = errore.try({
+    try: (): unknown => JSON.parse(line),
+    catch: (e) =>
+      new HermesRowInvalid(`${context}: not valid JSON`, { cause: e }),
+  })
+  if (parsed instanceof Error) throw parsed
   const result = schema.safeParse(parsed)
   if (!result.success) {
     throw new HermesRowInvalid(`${context}: ${z.prettifyError(result.error)}`)
@@ -96,6 +115,13 @@ export async function splitJsonlToSessionFiles(opts: {
       if (handle === null) {
         throw new HermesRowInvalid(
           `hermes/${opts.machine}: message ${env.sessionId} precedes its session header`,
+        )
+      }
+      if (env.type === 'message') {
+        parseLine(
+          messageRowSchema,
+          line,
+          `hermes/${opts.machine}: message ${env.sessionId}`,
         )
       }
       const payload = `${line}\n`

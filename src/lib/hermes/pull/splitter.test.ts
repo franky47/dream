@@ -17,6 +17,20 @@ async function* fromArray(lines: ReadonlyArray<string>): AsyncIterable<string> {
   for (const line of lines) yield line
 }
 
+function messageLine(fields: {
+  id: string
+  sessionId: string
+  logicalId?: string
+}): string {
+  return JSON.stringify({
+    type: 'message',
+    role: 'user',
+    content: 'hi',
+    createdAt: DAY1_MS,
+    ...fields,
+  })
+}
+
 function bucket(day: string): string {
   return path.join(dataDir, day, 'echo', 'hermes')
 }
@@ -43,15 +57,15 @@ describe('splitJsonlToSessionFiles', () => {
         sessionId: 'ses_a',
         latestMessageTime: DAY1_MS,
       }),
-      JSON.stringify({ type: 'message', id: 'msg_a1', sessionId: 'ses_a' }),
-      JSON.stringify({ type: 'message', id: 'msg_a2', sessionId: 'ses_a' }),
+      messageLine({ id: 'msg_a1', sessionId: 'ses_a' }),
+      messageLine({ id: 'msg_a2', sessionId: 'ses_a' }),
       JSON.stringify({
         type: 'session',
         id: 'ses_b',
         sessionId: 'ses_b',
         latestMessageTime: DAY2_MS,
       }),
-      JSON.stringify({ type: 'message', id: 'msg_b1', sessionId: 'ses_b' }),
+      messageLine({ id: 'msg_b1', sessionId: 'ses_b' }),
     ]
 
     const metrics = await splitJsonlToSessionFiles({
@@ -83,8 +97,7 @@ describe('splitJsonlToSessionFiles', () => {
         logicalId: 'ses_root',
         latestMessageTime: DAY2_MS,
       }),
-      JSON.stringify({
-        type: 'message',
+      messageLine({
         id: 'msg_root',
         sessionId: 'ses_root',
         logicalId: 'ses_root',
@@ -96,8 +109,7 @@ describe('splitJsonlToSessionFiles', () => {
         logicalId: 'ses_root',
         latestMessageTime: DAY2_MS,
       }),
-      JSON.stringify({
-        type: 'message',
+      messageLine({
         id: 'msg_cont',
         sessionId: 'ses_cont',
         logicalId: 'ses_root',
@@ -138,6 +150,65 @@ describe('splitJsonlToSessionFiles', () => {
     expect(result).toBeInstanceOf(Error)
     if (!(result instanceof Error)) throw new Error('unreachable')
     expect(result.message).toContain('hermes/echo')
+  })
+
+  test('fails with source context on a message row with null content', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_a',
+        sessionId: 'ses_a',
+        latestMessageTime: DAY1_MS,
+      }),
+      // A real db NULL projects as `"content":null`, which the renderer would
+      // silently drop; the gate rejects it instead.
+      `{"type":"message","id":"m","sessionId":"ses_a","role":"user","content":null,"createdAt":${DAY1_MS}}`,
+    ]
+    const result = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    if (!(result instanceof Error)) throw new Error('unreachable')
+    expect(result.message).toContain('hermes/echo')
+  })
+
+  test('fails with source context on a message row with null createdAt', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_a',
+        sessionId: 'ses_a',
+        latestMessageTime: DAY1_MS,
+      }),
+      `{"type":"message","id":"m","sessionId":"ses_a","role":"user","content":"hi","createdAt":null}`,
+    ]
+    const result = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    if (!(result instanceof Error)) throw new Error('unreachable')
+    expect(result.message).toContain('hermes/echo')
+  })
+
+  test('wraps a truncated json line in a tagged source error', async () => {
+    const lines = ['{"type":"session","sessionId":"ses_a","latestMess']
+    const result = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    if (!(result instanceof Error)) throw new Error('unreachable')
+    expect(result.message).toContain('hermes/echo')
+    expect(result.message).toContain('not valid JSON')
+    expect(result.cause).toBeInstanceOf(SyntaxError)
   })
 
   test('fails when a message precedes its session header', async () => {
