@@ -36,17 +36,20 @@ branches ingest as their own human sessions, and archived sessions are kept —
 their Markdown carries `archived: true`, which is absent on live sessions. Each
 selected session yields one JSONL file under the UTC day of its latest message.
 A session with no compaction also yields one Markdown file. A session compacted
-once in place splits into two context-window fragments, `<id>.1.md` and
-`<id>.2.md`.
+in place splits into one context-window fragment per window: N compactions
+produce N+1 fragments, `<id>.1.md` through `<id>.N+1.md`.
 
 Each fragment carries its own frontmatter (times, turns and tool counts for that
-window) plus a `contextWindow` number; the first also names its
-`nextContextWindow` and ends with a relative Markdown link to the second. The
-second fragment opens with a `<compaction>` block holding the summary Hermes sent
-to the model — its turn number, stored role and relative time, with the safety
-prefix and end marker stripped — and then repeats the recent tail Hermes
-preserved, so the file matches the context the model saw. The raw JSONL keeps
-every archived and live row untouched, including each message's `active` state.
+window) plus a `contextWindow` number; every fragment but the last also names its
+`nextContextWindow` and ends with a relative Markdown link to the next. Each
+post-compaction fragment opens with a `<compaction>` block holding the summary
+Hermes sent to the model — its turn number, stored role and relative time, with
+the safety prefix and end marker stripped — and then repeats the recent tail
+Hermes preserved, so the file matches the context the model saw. The renderer
+recognises the current summary marker, an older short-tag form, and a merged
+marker that folds an earlier summary into a later compaction; markers are
+stripped from Markdown but stay untouched in the raw JSONL, which keeps every
+archived and live row including each message's `active` state.
 
 The raw JSONL keeps the full source record: system prompt, model and model
 settings, usage, lineage, archive state, platform origin, and per-message

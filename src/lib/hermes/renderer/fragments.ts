@@ -10,11 +10,33 @@ import { renderHermesSession } from './session.ts'
 
 const RENDERER_VERSION = 'hermes-md@1'
 
-// Hermes wraps a compaction summary between these stable markers and prepends a
-// safety prefix that instructs the model. The renderer keeps only the body
-// between the markers, dropping both the prefix and the closing marker.
-const COMPACTION_BEGIN = '[hermes:compaction-summary]'
-const COMPACTION_END = '[/hermes:compaction-summary]'
+// Hermes wraps a compaction summary between stable bracket markers and prepends
+// a safety prefix that instructs the model. The renderer keeps only the body
+// between the markers, dropping the prefix and both markers.
+//
+// The marker has three recognised forms: the current build, an older build that
+// used a shorter tag before the "compaction" rename, and a merged summary that
+// folds an earlier window's summary into a later compaction. A merged body can
+// carry a nested current marker, so cleanup strips every known token, not just
+// the outer pair.
+interface MarkerForm {
+  begin: string
+  end: string
+}
+
+const MARKER_FORMS: readonly MarkerForm[] = [
+  { begin: '[hermes:compaction-summary]', end: '[/hermes:compaction-summary]' },
+  { begin: '[hermes:summary]', end: '[/hermes:summary]' },
+  {
+    begin: '[hermes:compaction-summary:merged]',
+    end: '[/hermes:compaction-summary:merged]',
+  },
+]
+
+const MARKER_TOKENS: readonly string[] = MARKER_FORMS.flatMap((form) => [
+  form.begin,
+  form.end,
+])
 
 const sessionRowSchema = z.object({
   type: z.literal('session'),
@@ -62,14 +84,46 @@ function parseRows(jsonlText: string): unknown[] {
   return out
 }
 
-function isCompactionSummary(content: string): boolean {
-  return content.includes(COMPACTION_BEGIN) && content.includes(COMPACTION_END)
+// The outer marker is whichever begin token appears earliest; a merged summary
+// opens with its own tag before any nested current tag. Detection needs that
+// literal token, so ordinary prose mentioning a summary is never mistaken for a
+// compaction event.
+function outerMarker(content: string): { form: MarkerForm; at: number } | null {
+  let best: { form: MarkerForm; at: number } | null = null
+  for (const form of MARKER_FORMS) {
+    const at = content.indexOf(form.begin)
+    if (at === -1) continue
+    if (best === null || at < best.at) best = { form, at }
+  }
+  return best
 }
 
+function isCompactionSummary(content: string): boolean {
+  return outerMarker(content) !== null
+}
+
+// Keep the body between the outer begin marker and the last matching end marker,
+// falling back to the end of the content when Hermes wrote no closing marker.
+// Any nested markers a merged summary carried are stripped from the body.
 function cleanSummaryBody(content: string): string {
-  const start = content.indexOf(COMPACTION_BEGIN) + COMPACTION_BEGIN.length
-  const end = content.indexOf(COMPACTION_END)
-  return content.slice(start, end).trim()
+  const outer = outerMarker(content)
+  if (outer === null) return content.trim()
+
+  const start = outer.at + outer.form.begin.length
+  const closeAt = content.lastIndexOf(outer.form.end)
+  const end = closeAt === -1 ? content.length : closeAt
+  let body = content.slice(start, end)
+  for (const token of MARKER_TOKENS) body = body.replaceAll(token, '')
+  return collapseBlankLines(body).trim()
+}
+
+// A newline is a control character, so oxlint's no-control-regex rejects it as a
+// literal; build the pattern from its char code instead.
+const NEWLINE = String.fromCharCode(10)
+const BLANK_LINE_RUN = new RegExp(`${NEWLINE}{3,}`, 'g')
+
+function collapseBlankLines(text: string): string {
+  return text.replaceAll(BLANK_LINE_RUN, `${NEWLINE}${NEWLINE}`)
 }
 
 function formatDelta(startMs: number, currentMs: number): string {
@@ -171,34 +225,47 @@ function collectMessages(raws: readonly unknown[]): MessageRow[] {
   return out
 }
 
+function summaryIndices(messages: readonly MessageRow[]): number[] {
+  const out: number[] = []
+  for (let i = 0; i < messages.length; i += 1) {
+    if (isCompactionSummary(messages[i]!.content)) out.push(i)
+  }
+  return out
+}
+
 // A logical Hermes session becomes one fragment per context window. Without a
 // compaction it stays a single unnumbered file, byte-identical to the basic
-// renderer. One in-place compaction yields two fragments: the archived
-// conversation, then the summary plus the tail Hermes preserved.
+// renderer. N in-place compactions yield N+1 fragments: the first window holds
+// the archived conversation, and every later window opens with a summary plus
+// the tail Hermes preserved. Each summary marks the boundary between two
+// windows.
 export function renderHermesFragments(jsonlText: string): HermesFragment[] {
   const raws = parseRows(jsonlText)
   const session = firstSession(raws)
   const messages = collectMessages(raws)
-  const summaryIndex = messages.findIndex((m) => isCompactionSummary(m.content))
+  const summaries = summaryIndices(messages)
 
-  if (session === null || summaryIndex === -1) {
+  if (session === null || summaries.length === 0) {
     return [{ contextWindow: null, markdown: renderHermesSession(jsonlText) }]
   }
 
-  return [
-    renderWindow({
-      session,
-      summary: null,
-      turns: messages.slice(0, summaryIndex),
-      contextWindow: 1,
-      nextContextWindow: 2,
-    }),
-    renderWindow({
-      session,
-      summary: messages[summaryIndex]!,
-      turns: messages.slice(summaryIndex + 1),
-      contextWindow: 2,
-      nextContextWindow: null,
-    }),
-  ]
+  const windowCount = summaries.length + 1
+  const fragments: HermesFragment[] = []
+  for (let w = 0; w < windowCount; w += 1) {
+    const isFirst = w === 0
+    const isLast = w === windowCount - 1
+    const summaryIndex = isFirst ? null : summaries[w - 1]!
+    const start = summaryIndex === null ? 0 : summaryIndex + 1
+    const end = isLast ? messages.length : summaries[w]!
+    fragments.push(
+      renderWindow({
+        session,
+        summary: summaryIndex === null ? null : messages[summaryIndex]!,
+        turns: messages.slice(start, end),
+        contextWindow: w + 1,
+        nextContextWindow: isLast ? null : w + 2,
+      }),
+    )
+  }
+  return fragments
 }
