@@ -33,25 +33,29 @@ const SUMMARY_CONTENT = `${SAFETY_PREFIX}\n\n[hermes:compaction-summary]\n${SUMM
 function compactedSession(): string {
   return jsonl([
     SESSION,
-    msg('m1', 'user', 'Please refactor the parser', 1, 'archived', min(0)),
-    msg('m2', 'assistant', 'Here is the plan.', 1, 'archived', min(1)),
-    msg('m3', 'user', 'Now add tests', 2, 'archived', min(2)),
-    msg('m4', 'assistant', 'Tests added.', 2, 'archived', min(3)),
-    msg('m5', 'assistant', SUMMARY_CONTENT, 3, 'active', min(4)),
-    msg('m6', 'user', 'Now add tests', 2, 'active', min(4) + 1_000),
-    msg('m7', 'assistant', 'Tests added.', 2, 'active', min(4) + 2_000),
-    msg('m8', 'user', 'Great, now optimize it', 4, 'active', min(6)),
-    msg('m9', 'assistant', 'Optimized.', 4, 'active', min(7)),
+    msg('m1', 'user', 'Please refactor the parser', 1, min(0)),
+    msg('m2', 'assistant', 'Here is the plan.', 1, min(1)),
+    msg('m3', 'user', 'Now add tests', 2, min(2)),
+    msg('m4', 'assistant', 'Tests added.', 2, min(3)),
+    msg('m5', 'assistant', SUMMARY_CONTENT, 3, min(4)),
+    msg('m6', 'user', 'Now add tests', 2, min(4) + 1_000),
+    msg('m7', 'assistant', 'Tests added.', 2, min(4) + 2_000),
+    msg('m8', 'user', 'Great, now optimize it', 4, min(6)),
+    msg('m9', 'assistant', 'Optimized.', 4, min(7)),
   ])
 }
 
+// The projection stores each row's live/rewound state in a numeric `active`
+// column; a `/undo` flips it to 0. Compaction has no flag of its own, so
+// archived rows stay live (`active: 1`) and only the summary marker splits
+// windows.
 function msg(
   id: string,
   role: string,
   content: string,
   turn: number,
-  activity: string,
   createdAt: number,
+  active = 1,
 ): object {
   return {
     type: 'message',
@@ -60,7 +64,44 @@ function msg(
     turn,
     role,
     content,
-    activity,
+    active,
+    createdAt,
+  }
+}
+
+function toolCallRow(
+  id: string,
+  callId: string,
+  name: string,
+  input: Record<string, unknown>,
+  createdAt: number,
+): object {
+  return {
+    type: 'message',
+    id,
+    sessionId: 'ses_1',
+    turn: 1,
+    role: 'assistant',
+    content: JSON.stringify({ type: 'tool_call', callId, name, input }),
+    active: 1,
+    createdAt,
+  }
+}
+
+function toolResultRow(
+  id: string,
+  callId: string,
+  output: string,
+  createdAt: number,
+): object {
+  return {
+    type: 'message',
+    id,
+    sessionId: 'ses_1',
+    turn: 1,
+    role: 'tool',
+    content: JSON.stringify({ type: 'tool_result', callId, output }),
+    active: 1,
     createdAt,
   }
 }
@@ -70,8 +111,8 @@ describe('renderHermesFragments', () => {
     const fragments = renderHermesFragments(
       jsonl([
         SESSION,
-        msg('m1', 'user', 'Hello', 1, 'active', min(0)),
-        msg('m2', 'assistant', 'Hi there.', 1, 'active', min(1)),
+        msg('m1', 'user', 'Hello', 1, min(0)),
+        msg('m2', 'assistant', 'Hi there.', 1, min(1)),
       ]),
     )
 
@@ -237,8 +278,8 @@ describe('renderHermesFragments', () => {
     const fragments = renderHermesFragments(
       jsonl([
         SESSION,
-        msg('m1', 'assistant', SUMMARY_CONTENT, 1, 'active', min(0)),
-        msg('m2', 'user', 'Carrying on', 2, 'active', min(1)),
+        msg('m1', 'assistant', SUMMARY_CONTENT, 1, min(0)),
+        msg('m2', 'user', 'Carrying on', 2, min(1)),
       ]),
     )
 
@@ -249,6 +290,170 @@ describe('renderHermesFragments', () => {
     expect(fragments[0]?.markdown).not.toContain('nextContextWindow')
     // No blank time bounds from an empty leading window.
     expect(fragments[0]?.markdown).not.toContain('startedAt: \n')
+  })
+})
+
+describe('renderHermesFragments message pipeline', () => {
+  // A paired tool call in a compacted window must render through the shared
+  // tool machinery, never leak its raw envelope, and count toward the window's
+  // tool total.
+  function compactedWithTool(): string {
+    return jsonl([
+      SESSION,
+      msg('m1', 'user', 'Please refactor the parser', 1, min(0)),
+      msg('m2', 'assistant', 'Here is the plan.', 1, min(1)),
+      msg('s1', 'assistant', SUMMARY_CONTENT, 2, min(2)),
+      msg('m3', 'user', 'run ls', 3, min(3)),
+      toolCallRow('tc1', 'c1', 'terminal', { command: 'ls' }, min(3) + 1_000),
+      toolResultRow('tr1', 'c1', 'file-a\nfile-b', min(3) + 2_000),
+    ])
+  }
+
+  test('renders a paired tool call and never leaks its raw envelope', () => {
+    const [, two] = renderHermesFragments(compactedWithTool())
+    expect(two?.markdown).toContain('<tool name="terminal" command="ls">')
+    expect(two?.markdown).not.toContain('{"type":"tool_call"')
+    expect(two?.markdown).toContain('file-a\nfile-b')
+  })
+
+  test('counts a compacted window tool call in the frontmatter total', () => {
+    const [, two] = renderHermesFragments(compactedWithTool())
+    expect(two?.markdown).toContain('tools: 1')
+  })
+
+  test('strips a Discord trigger note inside the archived window', () => {
+    const [one] = renderHermesFragments(
+      jsonl([
+        SESSION,
+        msg(
+          'm1',
+          'user',
+          'Sender: alice\n' +
+            '[Reply to Discord message 1417900000000000000 to respond.]\n\n' +
+            'Review the deployment plan.',
+          1,
+          min(0),
+        ),
+        msg('m2', 'assistant', 'On it.', 1, min(1)),
+        msg('s1', 'assistant', SUMMARY_CONTENT, 2, min(2)),
+        msg('m3', 'user', 'Carry on', 3, min(3)),
+      ]),
+    )
+
+    expect(one?.markdown).toContain('Sender: alice')
+    expect(one?.markdown).toContain('Review the deployment plan.')
+    expect(one?.markdown).not.toContain('Discord message 1417900000000000000')
+  })
+
+  test('counts tools per window, not as a shared constant', () => {
+    const fragments = renderHermesFragments(
+      jsonl([
+        SESSION,
+        msg('m1', 'user', 'read both files', 1, min(0)),
+        toolCallRow('a1', 'c1', 'read', { path: '/x' }, min(0) + 1_000),
+        toolResultRow('a2', 'c1', 'file x', min(0) + 2_000),
+        toolCallRow('a3', 'c2', 'read', { path: '/y' }, min(0) + 3_000),
+        toolResultRow('a4', 'c2', 'file y', min(0) + 4_000),
+        msg('s1', 'assistant', SUMMARY_CONTENT, 2, min(2)),
+        msg('m2', 'user', 'now list', 3, min(3)),
+        toolCallRow('b1', 'c3', 'terminal', { command: 'ls' }, min(3) + 1_000),
+        toolResultRow('b2', 'c3', 'out', min(3) + 2_000),
+      ]),
+    )
+
+    const [one, two] = fragments
+    expect(one?.markdown).toContain('tools: 2')
+    expect(two?.markdown).toContain('tools: 1')
+  })
+
+  test('excludes a rewound row from a compacted window', () => {
+    const [, two] = renderHermesFragments(
+      jsonl([
+        SESSION,
+        msg('m1', 'user', 'Please refactor the parser', 1, min(0)),
+        msg('m2', 'assistant', 'Here is the plan.', 1, min(1)),
+        msg('s1', 'assistant', SUMMARY_CONTENT, 2, min(2)),
+        msg('m3', 'user', 'Carry on', 3, min(3)),
+        msg(
+          'rw',
+          'assistant',
+          'Withdrawn reply that must vanish.',
+          3,
+          min(4),
+          0,
+        ),
+        msg('m4', 'assistant', 'Live reply that stays.', 3, min(5)),
+      ]),
+    )
+
+    expect(two?.markdown).toContain('Carry on')
+    expect(two?.markdown).toContain('Live reply that stays.')
+    expect(two?.markdown).not.toContain('Withdrawn reply that must vanish.')
+  })
+})
+
+describe('renderHermesFragments mixed rotation and in-place', () => {
+  // A rotated continuation opens with its carried summary, then compacts again
+  // in place mid-stream. The renderer joins every physical member into one
+  // stream, so two summaries split it into three windows regardless of the
+  // rotation boundary between them.
+  function mixedChain(): string {
+    return jsonl([
+      {
+        ...SESSION,
+        id: 'ses_root',
+        sessionId: 'ses_root',
+        logicalId: 'ses_root',
+      },
+      mixedMsg('r1', 'ses_root', 'user', 'Question one', min(0)),
+      mixedMsg('r2', 'ses_root', 'assistant', 'Answer one', min(1)),
+      {
+        type: 'session',
+        id: 'ses_c1',
+        sessionId: 'ses_c1',
+        logicalId: 'ses_root',
+        parentId: 'ses_root',
+        createdAt: min(2),
+      },
+      mixedMsg('c1s', 'ses_c1', 'assistant', SUMMARY_CONTENT, min(2)),
+      mixedMsg('c1a', 'ses_c1', 'user', 'Question two', min(3)),
+      mixedMsg('c1b', 'ses_c1', 'assistant', 'Answer two', min(4)),
+      mixedMsg('c1mid', 'ses_c1', 'assistant', SUMMARY_CONTENT, min(5)),
+      mixedMsg('c1c', 'ses_c1', 'user', 'Question three', min(6)),
+    ])
+  }
+
+  function mixedMsg(
+    id: string,
+    sessionId: string,
+    role: string,
+    content: string,
+    createdAt: number,
+  ): object {
+    return {
+      type: 'message',
+      id,
+      sessionId,
+      turn: 1,
+      role,
+      content,
+      active: 1,
+      createdAt,
+    }
+  }
+
+  test('a rotation summary and an in-place summary yield three windows', () => {
+    const fragments = renderHermesFragments(mixedChain())
+    expect(fragments.map((f) => f.contextWindow)).toEqual([1, 2, 3])
+  })
+
+  test('the mixed chain links every window forward by the root uuid', () => {
+    const [one, two, three] = renderHermesFragments(mixedChain())
+    expect(one?.markdown.trimEnd().endsWith('](./ses_root.2.md)')).toBe(true)
+    expect(two?.markdown.trimEnd().endsWith('](./ses_root.3.md)')).toBe(true)
+    expect(three?.markdown).not.toContain('nextContextWindow')
+    expect(two?.markdown).toContain('Question two')
+    expect(three?.markdown).toContain('Question three')
   })
 })
 
@@ -264,28 +469,14 @@ function currentSummary(body: string): string {
 function twiceCompactedSession(): string {
   return jsonl([
     SESSION,
-    msg('m1', 'user', 'Please refactor the parser', 1, 'archived', min(0)),
-    msg('m2', 'assistant', 'Here is the plan.', 1, 'archived', min(1)),
-    msg(
-      's1',
-      'assistant',
-      currentSummary(FIRST_SUMMARY_BODY),
-      2,
-      'archived',
-      min(2),
-    ),
-    msg('m3', 'user', 'Now add tests', 3, 'archived', min(3)),
-    msg('m4', 'assistant', 'Tests added.', 3, 'archived', min(4)),
-    msg(
-      's2',
-      'assistant',
-      currentSummary(SECOND_SUMMARY_BODY),
-      4,
-      'active',
-      min(5),
-    ),
-    msg('m5', 'user', 'Now optimize it', 5, 'active', min(6)),
-    msg('m6', 'assistant', 'Optimized.', 5, 'active', min(7)),
+    msg('m1', 'user', 'Please refactor the parser', 1, min(0)),
+    msg('m2', 'assistant', 'Here is the plan.', 1, min(1)),
+    msg('s1', 'assistant', currentSummary(FIRST_SUMMARY_BODY), 2, min(2)),
+    msg('m3', 'user', 'Now add tests', 3, min(3)),
+    msg('m4', 'assistant', 'Tests added.', 3, min(4)),
+    msg('s2', 'assistant', currentSummary(SECOND_SUMMARY_BODY), 4, min(5)),
+    msg('m5', 'user', 'Now optimize it', 5, min(6)),
+    msg('m6', 'assistant', 'Optimized.', 5, min(7)),
   ])
 }
 
@@ -339,9 +530,9 @@ describe('renderHermesFragments summary marker forms', () => {
     const fragments = renderHermesFragments(
       jsonl([
         SESSION,
-        msg('m1', 'user', 'Plan it', 1, 'archived', min(0)),
-        msg('s1', 'assistant', historical, 2, 'active', min(1)),
-        msg('m2', 'user', 'Keep going', 3, 'active', min(2)),
+        msg('m1', 'user', 'Plan it', 1, min(0)),
+        msg('s1', 'assistant', historical, 2, min(1)),
+        msg('m2', 'user', 'Keep going', 3, min(2)),
       ]),
     )
 
@@ -357,9 +548,9 @@ describe('renderHermesFragments summary marker forms', () => {
     const fragments = renderHermesFragments(
       jsonl([
         SESSION,
-        msg('m1', 'user', 'Plan it', 1, 'archived', min(0)),
-        msg('s1', 'assistant', noEnd, 2, 'active', min(1)),
-        msg('m2', 'user', 'Keep going', 3, 'active', min(2)),
+        msg('m1', 'user', 'Plan it', 1, min(0)),
+        msg('s1', 'assistant', noEnd, 2, min(1)),
+        msg('m2', 'user', 'Keep going', 3, min(2)),
       ]),
     )
 
@@ -376,9 +567,9 @@ describe('renderHermesFragments summary marker forms', () => {
     const fragments = renderHermesFragments(
       jsonl([
         SESSION,
-        msg('m1', 'user', 'Plan it', 1, 'archived', min(0)),
-        msg('s1', 'assistant', merged, 2, 'active', min(1)),
-        msg('m2', 'user', 'Keep going', 3, 'active', min(2)),
+        msg('m1', 'user', 'Plan it', 1, min(0)),
+        msg('s1', 'assistant', merged, 2, min(1)),
+        msg('m2', 'user', 'Keep going', 3, min(2)),
       ]),
     )
 
@@ -395,8 +586,8 @@ describe('renderHermesFragments summary marker forms', () => {
     const fragments = renderHermesFragments(
       jsonl([
         SESSION,
-        msg('m1', 'user', 'Give me a summary', 1, 'active', min(0)),
-        msg('m2', 'assistant', chatty, 1, 'active', min(1)),
+        msg('m1', 'user', 'Give me a summary', 1, min(0)),
+        msg('m2', 'assistant', chatty, 1, min(1)),
       ]),
     )
 

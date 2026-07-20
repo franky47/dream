@@ -1,12 +1,16 @@
 import { z } from 'zod'
 
+import { renderConversation } from '#lib/renderer/render'
+import type { NormalizedMessage } from '#lib/renderer/types'
+
 import {
   type Frontmatter,
   frontmatterToYaml,
   scalarPlatformFields,
 } from './frontmatter.ts'
+import { normalizeMessages } from './normalize.ts'
 import { isRewound } from './rewound.ts'
-import { renderHermesSession } from './session.ts'
+import { hermesRenderConfig, renderHermesSession } from './session.ts'
 
 const RENDERER_VERSION = 'hermes-md@1'
 
@@ -47,9 +51,12 @@ const sessionRowSchema = z.object({
   archived: z.number().nullable().optional(),
 })
 
+// Permissive on role so tool-result rows (role "tool") survive to the normalize
+// pipeline instead of dropping out of the fragment stream. Downstream code owns
+// the role split; here every message row is a window member.
 const messageRowSchema = z.object({
   type: z.literal('message'),
-  role: z.enum(['user', 'assistant']),
+  role: z.string(),
   content: z.string(),
   createdAt: z.number(),
   turn: z.number().optional(),
@@ -58,6 +65,12 @@ const messageRowSchema = z.object({
 type SessionRow = z.infer<typeof sessionRowSchema>
 type MessageRow = z.infer<typeof messageRowSchema>
 
+interface MessageEntry {
+  raw: unknown
+  row: MessageRow
+  isSummary: boolean
+}
+
 export interface HermesFragment {
   contextWindow: number | null
   markdown: string
@@ -65,8 +78,9 @@ export interface HermesFragment {
 
 interface WindowSpec {
   session: SessionRow
-  summary: MessageRow | null
-  turns: MessageRow[]
+  summary: MessageEntry | null
+  windowEntries: readonly MessageEntry[]
+  bodyMessages: readonly NormalizedMessage[]
   contextWindow: number
   nextContextWindow: number | null
 }
@@ -126,13 +140,6 @@ function collapseBlankLines(text: string): string {
   return text.replaceAll(BLANK_LINE_RUN, `${NEWLINE}${NEWLINE}`)
 }
 
-function formatDelta(startMs: number, currentMs: number): string {
-  const totalSec = Math.max(0, Math.round((currentMs - startMs) / 1000))
-  const m = Math.floor(totalSec / 60)
-  const s = totalSec % 60
-  return `+${m}m${s.toString().padStart(2, '0')}s`
-}
-
 function renderCompactionBlock(summary: MessageRow): string {
   const body = cleanSummaryBody(summary.content)
   const turnAttr = summary.turn === undefined ? '' : ` turn="${summary.turn}"`
@@ -140,28 +147,18 @@ function renderCompactionBlock(summary: MessageRow): string {
 }
 
 function renderWindowBody(spec: WindowSpec): string {
-  const timeline =
-    spec.summary === null ? spec.turns : [spec.summary, ...spec.turns]
   const lines: string[] = []
-  let firstStampMs: number | null = null
-  let n = 0
-
-  for (let i = 0; i < timeline.length; i += 1) {
-    const msg = timeline[i]!
-    const t =
-      firstStampMs === null ? '0' : formatDelta(firstStampMs, msg.createdAt)
-    firstStampMs ??= msg.createdAt
-
-    if (spec.summary !== null && i === 0) {
-      lines.push(renderCompactionBlock(msg))
-      continue
-    }
-
-    n += 1
-    lines.push(`<turn n="${n}" role="${msg.role}" t="${t}"/>`)
-    const body = msg.content.trim()
-    if (body.length > 0) lines.push(body)
+  if (spec.summary !== null) {
+    lines.push(renderCompactionBlock(spec.summary.row))
   }
+
+  const anchorMs = spec.summary?.row.createdAt ?? null
+  const turns = renderConversation(
+    spec.bodyMessages,
+    hermesRenderConfig,
+    anchorMs,
+  )
+  if (turns.length > 0) lines.push(turns)
 
   if (spec.nextContextWindow !== null) {
     const href = `./${spec.session.sessionId}.${spec.nextContextWindow}.md`
@@ -173,14 +170,27 @@ function renderWindowBody(spec: WindowSpec): string {
   return lines.join('\n')
 }
 
+function countTools(messages: readonly NormalizedMessage[]): number {
+  let n = 0
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if (part.kind === 'tool') n += 1
+    }
+  }
+  return n
+}
+
+function isoStamp(ms: number): string {
+  return new Date(ms).toISOString()
+}
+
 function buildWindowFrontmatter(spec: WindowSpec): Frontmatter {
-  const timeline =
-    spec.summary === null ? spec.turns : [spec.summary, ...spec.turns]
+  const entries = spec.windowEntries
   const startedAt =
-    timeline.length > 0 ? new Date(timeline[0]!.createdAt).toISOString() : ''
+    entries.length > 0 ? isoStamp(entries[0]!.row.createdAt) : ''
   const endedAt =
-    timeline.length > 0
-      ? new Date(timeline[timeline.length - 1]!.createdAt).toISOString()
+    entries.length > 0
+      ? isoStamp(entries[entries.length - 1]!.row.createdAt)
       : ''
 
   const fm: Frontmatter = {
@@ -190,8 +200,8 @@ function buildWindowFrontmatter(spec: WindowSpec): Frontmatter {
     archived: (spec.session.archived ?? 0) > 0,
     startedAt,
     endedAt,
-    turns: spec.turns.filter((m) => m.role === 'user').length,
-    tools: 0,
+    turns: spec.bodyMessages.filter((m) => m.role === 'user').length,
+    tools: countTools(spec.bodyMessages),
     contextWindow: spec.contextWindow,
     platform: scalarPlatformFields(spec.session.platform),
     renderer: RENDERER_VERSION,
@@ -215,20 +225,28 @@ function firstSession(raws: readonly unknown[]): SessionRow | null {
   return null
 }
 
-function collectMessages(raws: readonly unknown[]): MessageRow[] {
-  const out: MessageRow[] = []
+// Live message rows in order, each tagged with whether it opens a context
+// window. Rewound rows never enter the stream, so they cannot start a window or
+// skew a window's counts or time bounds.
+function collectEntries(raws: readonly unknown[]): MessageEntry[] {
+  const out: MessageEntry[] = []
   for (const raw of raws) {
     if (isRewound(raw)) continue
     const parsed = messageRowSchema.safeParse(raw)
-    if (parsed.success) out.push(parsed.data)
+    if (!parsed.success) continue
+    out.push({
+      raw,
+      row: parsed.data,
+      isSummary: isCompactionSummary(parsed.data.content),
+    })
   }
   return out
 }
 
-function summaryIndices(messages: readonly MessageRow[]): number[] {
+function summaryPositions(entries: readonly MessageEntry[]): number[] {
   const out: number[] = []
-  for (let i = 0; i < messages.length; i += 1) {
-    if (isCompactionSummary(messages[i]!.content)) out.push(i)
+  for (let i = 0; i < entries.length; i += 1) {
+    if (entries[i]!.isSummary) out.push(i)
   }
   return out
 }
@@ -244,11 +262,16 @@ function summaryIndices(messages: readonly MessageRow[]): number[] {
 // precedes them only when real turns come before the first summary; an
 // orphaned continuation whose stream opens with a summary skips that empty
 // window.
+//
+// Each window's body flows through the same normalize + render machinery as the
+// unnumbered path, so tool calls pair and render, Discord notes strip, and
+// rewound rows drop identically. Only the compaction block and the relative
+// next-window link are fragment-level concerns.
 export function renderHermesFragments(jsonlText: string): HermesFragment[] {
   const raws = parseRows(jsonlText)
   const session = firstSession(raws)
-  const messages = collectMessages(raws)
-  const summaries = summaryIndices(messages)
+  const entries = collectEntries(raws)
+  const summaries = summaryPositions(entries)
 
   if (session === null || summaries.length === 0) {
     return [{ contextWindow: null, markdown: renderHermesSession(jsonlText) }]
@@ -258,11 +281,17 @@ export function renderHermesFragments(jsonlText: string): HermesFragment[] {
   const starts = hasLeadingArchive ? [0, ...summaries] : summaries
   return starts.map((start, w) => {
     const isSummaryWindow = w > 0 || !hasLeadingArchive
+    const end = starts[w + 1] ?? entries.length
+    const windowEntries = entries.slice(start, end)
+    const summary = isSummaryWindow ? windowEntries[0]! : null
+    const bodyEntries =
+      summary === null ? windowEntries : windowEntries.slice(1)
     const contextWindow = w + 1
     return renderWindow({
       session,
-      summary: isSummaryWindow ? messages[start]! : null,
-      turns: messages.slice(isSummaryWindow ? start + 1 : start, starts[w + 1]),
+      summary,
+      windowEntries,
+      bodyMessages: normalizeMessages(bodyEntries.map((e) => e.raw)),
       contextWindow,
       nextContextWindow:
         contextWindow < starts.length ? contextWindow + 1 : null,
