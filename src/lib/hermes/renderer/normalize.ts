@@ -7,6 +7,7 @@ import type {
   Role,
 } from '#lib/renderer/types'
 
+import { stripDiscordTriggerNote } from './discord.ts'
 import { extractFrontmatter, frontmatterToYaml } from './frontmatter.ts'
 
 const messageRowSchema = z.object({
@@ -37,10 +38,11 @@ export function normalize(jsonlText: string): NormalizedSession {
   for (const raw of raws) {
     const msg = messageRowSchema.safeParse(raw)
     if (!msg.success) continue
-    const parts: Part[] =
-      msg.data.content.length > 0
-        ? [{ kind: 'text', text: msg.data.content }]
-        : []
+    const text =
+      msg.data.role === 'user'
+        ? stripDiscordTriggerNote(msg.data.content)
+        : msg.data.content
+    const parts: Part[] = text.length > 0 ? [{ kind: 'text', text }] : []
     messages.push({
       role: msg.data.role satisfies Role,
       timestampMs: msg.data.createdAt,

@@ -42,4 +42,8 @@ system prompt, model settings and reasoning, while its frontmatter lists every
 platform ID a session carries (channel, thread, guild, author). A session with
 no such data simply omits those fields, so nothing shows a placeholder ID.
 
+For Discord-sourced turns, the Markdown drops the fixed note Hermes injects to
+tell its reply tool which message triggered the run. Sender, reply and
+attachment context stay in place, and the raw JSONL keeps the stored text as-is.
+
 This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
