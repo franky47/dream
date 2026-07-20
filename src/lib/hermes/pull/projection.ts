@@ -8,6 +8,13 @@ import type { Database } from 'bun:sqlite'
 // Eligible = a human-led root session (no parent) whose newest message lands
 // inside the half-open [since, until) window. Cron, webhook and subagent
 // sources are background work and stay out of the human archive.
+//
+// The raw archive keeps every selected field, including the system prompt,
+// model settings, usage, lineage, archive state and platform origin. Columns
+// that hold nested JSON pass through `json()` so the row embeds them as real
+// JSON rather than an escaped string. The Markdown renderer omits the noisy
+// ones (system prompt, model settings, reasoning) while keeping the archive
+// complete.
 function eligibleSessionsCte(
   sinceLiteral: string,
   untilLiteral: string,
@@ -44,7 +51,14 @@ function projectionSqlTemplate(
           'source', s.source,
           'title', s.title,
           'createdAt', s.created_at,
-          'latestMessageTime', e.latest_message_time
+          'latestMessageTime', e.latest_message_time,
+          'parentId', s.parent_id,
+          'archived', s.archived,
+          'systemPrompt', s.system_prompt,
+          'model', s.model,
+          'modelSettings', json(s.model_settings),
+          'usage', json(s.usage),
+          'platform', json(s.platform)
         ) AS row,
         s.id AS session_id,
         0 AS type_rank,
@@ -62,7 +76,9 @@ function projectionSqlTemplate(
           'turn', m.turn,
           'role', m.role,
           'content', m.content,
-          'createdAt', m.created_at
+          'createdAt', m.created_at,
+          'reasoning', m.reasoning,
+          'metadata', json(m.metadata)
         ) AS row,
         m.session_id,
         1 AS type_rank,

@@ -25,6 +25,11 @@ const SCHEMA_STATEMENTS = [
     parent_id TEXT,
     title TEXT,
     archived INTEGER NOT NULL DEFAULT 0,
+    system_prompt TEXT,
+    model TEXT,
+    model_settings TEXT,
+    usage TEXT,
+    platform TEXT,
     created_at INTEGER NOT NULL
   )`,
   `CREATE TABLE messages (
@@ -33,6 +38,8 @@ const SCHEMA_STATEMENTS = [
     turn INTEGER NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
+    reasoning TEXT,
+    metadata TEXT,
     created_at INTEGER NOT NULL
   )`,
 ]
@@ -51,18 +58,30 @@ function insertSession(
     parentId?: string | null
     title?: string
     archived?: number
+    systemPrompt?: string | null
+    model?: string | null
+    modelSettings?: string | null
+    usage?: string | null
+    platform?: string | null
     createdAt?: number
   },
 ): void {
   db.prepare(
-    `INSERT INTO sessions (id, source, parent_id, title, archived, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO sessions
+       (id, source, parent_id, title, archived,
+        system_prompt, model, model_settings, usage, platform, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     s.id,
     s.source ?? 'discord',
     s.parentId ?? null,
     s.title ?? 'untitled',
     s.archived ?? 0,
+    s.systemPrompt ?? null,
+    s.model ?? null,
+    s.modelSettings ?? null,
+    s.usage ?? null,
+    s.platform ?? null,
     s.createdAt ?? 1_000,
   )
 }
@@ -75,18 +94,23 @@ function insertMessage(
     turn?: number
     role?: string
     content?: string
+    reasoning?: string | null
+    metadata?: string | null
     createdAt: number
   },
 ): void {
   db.prepare(
-    `INSERT INTO messages (id, session_id, turn, role, content, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO messages
+       (id, session_id, turn, role, content, reasoning, metadata, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     m.id,
     m.sessionId,
     m.turn ?? 1,
     m.role ?? 'user',
     m.content ?? 'hello',
+    m.reasoning ?? null,
+    m.metadata ?? null,
     m.createdAt,
   )
 }
@@ -250,6 +274,81 @@ describe('projectRows', () => {
 
     const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
     expect(rows).toHaveLength(0)
+    db.close()
+  })
+
+  test('retains full session metadata, embedding nested JSON as JSON', () => {
+    const db = openFreshDb()
+    insertSession(db, {
+      id: 'ses_1',
+      archived: 1,
+      systemPrompt: 'You are Hermes.',
+      model: 'llama-swap/big',
+      modelSettings: JSON.stringify({ temperature: 0.7, maxTokens: 4096 }),
+      usage: JSON.stringify({ inputTokens: 120, outputTokens: 340 }),
+      platform: JSON.stringify({ channelId: '42', guildId: '7' }),
+      createdAt: 5_000,
+    })
+    insertMessage(db, { id: 'msg_1', sessionId: 'ses_1', createdAt: 6_000 })
+
+    const session = parseRows(
+      projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }),
+    )[0]
+
+    expect(session?.parentId).toBeNull()
+    expect(session?.archived).toBe(1)
+    expect(session?.systemPrompt).toBe('You are Hermes.')
+    expect(session?.model).toBe('llama-swap/big')
+    expect(session?.modelSettings).toEqual({
+      temperature: 0.7,
+      maxTokens: 4096,
+    })
+    expect(session?.usage).toEqual({ inputTokens: 120, outputTokens: 340 })
+    expect(session?.platform).toEqual({ channelId: '42', guildId: '7' })
+    db.close()
+  })
+
+  test('retains message reasoning and provider-specific metadata', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_1', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_1',
+      sessionId: 'ses_1',
+      role: 'assistant',
+      content: 'The answer is 42.',
+      reasoning: 'First I considered the alternatives...',
+      metadata: JSON.stringify({ finishReason: 'stop', providerId: 'echo' }),
+      createdAt: 6_000,
+    })
+
+    const message = parseRows(
+      projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }),
+    )[1]
+
+    expect(message?.reasoning).toBe('First I considered the alternatives...')
+    expect(message?.metadata).toEqual({
+      finishReason: 'stop',
+      providerId: 'echo',
+    })
+    db.close()
+  })
+
+  test('emits null for missing optional metadata without inventing values', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_1', createdAt: 5_000 })
+    insertMessage(db, { id: 'msg_1', sessionId: 'ses_1', createdAt: 6_000 })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+    const session = rows[0]
+    const message = rows[1]
+
+    expect(session?.systemPrompt).toBeNull()
+    expect(session?.model).toBeNull()
+    expect(session?.modelSettings).toBeNull()
+    expect(session?.usage).toBeNull()
+    expect(session?.platform).toBeNull()
+    expect(message?.reasoning).toBeNull()
+    expect(message?.metadata).toBeNull()
     db.close()
   })
 })

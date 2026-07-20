@@ -2,11 +2,18 @@ import { z } from 'zod'
 
 const RENDERER_VERSION = 'hermes-md@1'
 
+// Platform origin travels as a nested object on the session row. Keep the parse
+// permissive: read whatever scalar fields a platform provides (channel, thread,
+// guild, author IDs and their human-readable labels) and ignore nested shapes,
+// so one odd field never drops the whole block.
+const platformFieldSchema = z.union([z.string(), z.number(), z.boolean()])
+
 const sessionRowSchema = z.object({
   type: z.literal('session'),
   sessionId: z.string(),
   source: z.string().nullable().optional(),
   title: z.string().nullable().optional(),
+  platform: z.unknown().optional(),
 })
 
 const messageRowSchema = z.object({
@@ -18,6 +25,8 @@ const messageRowSchema = z.object({
 type SessionRow = z.infer<typeof sessionRowSchema>
 type MessageRow = z.infer<typeof messageRowSchema>
 
+type PlatformField = z.infer<typeof platformFieldSchema>
+
 export interface Frontmatter {
   sessionId: string
   source: string
@@ -25,7 +34,25 @@ export interface Frontmatter {
   startedAt: string
   endedAt: string
   turns: number
+  platform: Record<string, PlatformField>
   renderer: string
+}
+
+function scalarPlatformFields(
+  platform: unknown,
+): Record<string, PlatformField> {
+  const out: Record<string, PlatformField> = {}
+  if (
+    platform == null ||
+    typeof platform !== 'object' ||
+    Array.isArray(platform)
+  )
+    return out
+  for (const [key, value] of Object.entries(platform)) {
+    const field = platformFieldSchema.safeParse(value)
+    if (field.success) out[key] = field.data
+  }
+  return out
 }
 
 function parseRows(jsonlText: string): unknown[] {
@@ -72,12 +99,17 @@ export function extractFrontmatter(jsonlText: string): Frontmatter {
     startedAt,
     endedAt,
     turns: messages.filter((m) => m.role === 'user').length,
+    platform: scalarPlatformFields(session?.platform),
     renderer: RENDERER_VERSION,
   }
 }
 
 function yamlEscapeString(s: string): string {
   return `"${s.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`
+}
+
+function yamlScalar(value: PlatformField): string {
+  return typeof value === 'string' ? yamlEscapeString(value) : String(value)
 }
 
 export function frontmatterToYaml(fm: Frontmatter): string {
@@ -88,6 +120,13 @@ export function frontmatterToYaml(fm: Frontmatter): string {
   lines.push(`startedAt: ${fm.startedAt}`)
   lines.push(`endedAt: ${fm.endedAt}`)
   lines.push(`turns: ${fm.turns}`)
+  const platformKeys = Object.keys(fm.platform).sort()
+  if (platformKeys.length > 0) {
+    lines.push('platform:')
+    for (const key of platformKeys) {
+      lines.push(`  ${key}: ${yamlScalar(fm.platform[key]!)}`)
+    }
+  }
   lines.push(`renderer: ${yamlEscapeString(fm.renderer)}`)
   lines.push('---')
   return lines.join('\n') + '\n'

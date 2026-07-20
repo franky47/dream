@@ -35,4 +35,11 @@ Cron, webhook and subagent sessions stay out of the archive. Each selected
 session yields one JSONL file and one Markdown file under the UTC day of its
 latest message.
 
+The raw JSONL keeps the full source record: system prompt, model and model
+settings, usage, lineage, archive state, platform origin, and per-message
+reasoning and provider metadata. The Markdown stays readable by omitting the
+system prompt, model settings and reasoning, while its frontmatter lists every
+platform ID a session carries (channel, thread, guild, author). A session with
+no such data simply omits those fields, so nothing shows a placeholder ID.
+
 This project was created using `bun init` in bun v1.3.11. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.
