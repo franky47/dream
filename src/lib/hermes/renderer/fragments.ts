@@ -235,10 +235,15 @@ function summaryIndices(messages: readonly MessageRow[]): number[] {
 
 // A logical Hermes session becomes one fragment per context window. Without a
 // compaction it stays a single unnumbered file, byte-identical to the basic
-// renderer. N in-place compactions yield N+1 fragments: the first window holds
-// the archived conversation, and every later window opens with a summary plus
-// the tail Hermes preserved. Each summary marks the boundary between two
-// windows.
+// renderer. Each compaction summary opens a new window, so N summaries yield
+// N+1 fragments when real turns precede the first summary: an in-place
+// compaction marks its summary mid-stream, while a rotated continuation
+// carries its summary as the first message of the next physical session. Both
+// forms join into one message stream here, so each summary starts a window
+// that shows the summary plus the tail it preserved. A leading archived window
+// precedes them only when real turns come before the first summary; an
+// orphaned continuation whose stream opens with a summary skips that empty
+// window.
 export function renderHermesFragments(jsonlText: string): HermesFragment[] {
   const raws = parseRows(jsonlText)
   const session = firstSession(raws)
@@ -249,23 +254,18 @@ export function renderHermesFragments(jsonlText: string): HermesFragment[] {
     return [{ contextWindow: null, markdown: renderHermesSession(jsonlText) }]
   }
 
-  const windowCount = summaries.length + 1
-  const fragments: HermesFragment[] = []
-  for (let w = 0; w < windowCount; w += 1) {
-    const isFirst = w === 0
-    const isLast = w === windowCount - 1
-    const summaryIndex = isFirst ? null : summaries[w - 1]!
-    const start = summaryIndex === null ? 0 : summaryIndex + 1
-    const end = isLast ? messages.length : summaries[w]!
-    fragments.push(
-      renderWindow({
-        session,
-        summary: summaryIndex === null ? null : messages[summaryIndex]!,
-        turns: messages.slice(start, end),
-        contextWindow: w + 1,
-        nextContextWindow: isLast ? null : w + 2,
-      }),
-    )
-  }
-  return fragments
+  const hasLeadingArchive = summaries[0] !== 0
+  const starts = hasLeadingArchive ? [0, ...summaries] : summaries
+  return starts.map((start, w) => {
+    const isSummaryWindow = w > 0 || !hasLeadingArchive
+    const contextWindow = w + 1
+    return renderWindow({
+      session,
+      summary: isSummaryWindow ? messages[start]! : null,
+      turns: messages.slice(isSummaryWindow ? start + 1 : start, starts[w + 1]),
+      contextWindow,
+      nextContextWindow:
+        contextWindow < starts.length ? contextWindow + 1 : null,
+    })
+  })
 }
