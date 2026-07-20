@@ -5,16 +5,31 @@ import type { Database } from 'bun:sqlite'
 // per-line JSONL shape the splitter and renderer consume, so remote reads over
 // the sqlite3 CLI and local reads over bun:sqlite share one code path.
 //
-// Eligible = a human-led root session (no parent) whose newest message lands
-// inside the half-open [since, until) window. Cron, webhook and subagent
-// sources are background work and stay out of the human archive.
-//
 // The raw archive keeps every selected field, including the system prompt,
 // model settings, usage, lineage, archive state and platform origin. Columns
 // that hold nested JSON pass through `json()` so the row embeds them as real
 // JSON rather than an escaped string. The Markdown renderer omits the noisy
 // ones (system prompt, model settings, reasoning) while keeping the archive
 // complete.
+//
+// Background sources are machine-driven work that never belongs in the human
+// archive. Selecting by source (rather than by root-only lineage) lets a
+// user-created branch through: a branch keeps its parent's human source, so it
+// reads as its own human session even though it carries a `parent_id`. A
+// delegated subagent carries the `subagent` source, so the same filter drops it
+// without inspecting lineage.
+const BACKGROUND_SOURCES = ['cron', 'webhook', 'subagent'] as const
+
+function backgroundSourceList(): string {
+  return BACKGROUND_SOURCES.map((s) => `'${s}'`).join(', ')
+}
+
+// Eligible = a human-led session whose newest message lands inside the half-open
+// [since, until) window and whose source is not background work. A null source
+// is not background work, so the filter keeps it rather than letting SQL's
+// three-valued `NULL NOT IN (...)` drop it. Archived sessions stay eligible:
+// hiding a session in Hermes must not remove it from Dream, so there is no
+// archive filter here.
 function eligibleSessionsCte(
   sinceLiteral: string,
   untilLiteral: string,
@@ -28,8 +43,7 @@ function eligibleSessionsCte(
         FROM messages
         GROUP BY session_id
       ) latest ON latest.session_id = s.id
-      WHERE s.parent_id IS NULL
-        AND s.source NOT IN ('cron', 'webhook', 'subagent')
+      WHERE (s.source IS NULL OR s.source NOT IN (${backgroundSourceList()}))
         AND latest.ts >= ${sinceLiteral}
         AND latest.ts < ${untilLiteral}
     )
@@ -50,6 +64,8 @@ function projectionSqlTemplate(
           'sessionId', s.id,
           'source', s.source,
           'title', s.title,
+          'parentId', s.parent_id,
+          'archived', s.archived,
           'createdAt', s.created_at,
           'latestMessageTime', e.latest_message_time,
           'parentId', s.parent_id,
