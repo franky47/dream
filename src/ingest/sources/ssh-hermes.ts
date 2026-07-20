@@ -174,7 +174,11 @@ export async function runSshHermesPipeline(opts: {
     })
   }
 
-  const { sessionPaths, ...metrics } = splitResult
+  // The stream drained and SSH exited clean, so the staged sessions are whole;
+  // only now do the final `.jsonl` files land on disk. A dropped transport
+  // leaves the staging in memory untouched and nothing partial behind.
+  const { sessionPaths, commit, ...metrics } = splitResult
+  await commit()
   for (const jsonlPath of sessionPaths) {
     const jsonlText = await Bun.file(jsonlPath).text()
     const base = jsonlPath.replace(/\.jsonl$/, '')

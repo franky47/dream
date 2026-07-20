@@ -1,4 +1,4 @@
-import { mkdir, open, type FileHandle } from 'node:fs/promises'
+import { mkdir } from 'node:fs/promises'
 import path from 'node:path'
 
 import * as errore from 'errore'
@@ -11,6 +11,15 @@ export type SplitterMetrics = {
   messages_pulled: number
   bytes: number
   sessionPaths: string[]
+}
+
+// The stream is validated in full before a single final file appears. Staging
+// keeps each session's lines in memory and `commit` writes them only once the
+// caller is satisfied the whole stream arrived intact (locally: the loop ran to
+// completion; over SSH: the transport also exited 0). A malformed late row or a
+// dropped transport therefore never leaves a truncated `.jsonl` on disk.
+export type StagedSplit = SplitterMetrics & {
+  commit: () => Promise<void>
 }
 
 // A rotated chain projects several physical `session` rows under one
@@ -47,12 +56,26 @@ const messageRowSchema = z.object({
   createdAt: z.number(),
 })
 
+// A session id becomes a filename, so it must be a single safe path segment.
+// Anything with a separator, a `..` traversal, a leading dash (would read as a
+// flag) or an out-of-charset character is rejected before it can escape the day
+// bucket. Real Hermes ids are `ses_…` slugs or UUIDs, well inside this set.
+const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
 function logicalKey(env: { sessionId: string; logicalId?: string }): string {
   return env.logicalId ?? env.sessionId
 }
 
 class HermesRowInvalid extends Error {
   override name = 'HermesRowInvalid'
+}
+
+function assertSafeSegment(key: string, machine: string): void {
+  if (key.length === 0 || key.includes('..') || !SAFE_SEGMENT.test(key)) {
+    throw new HermesRowInvalid(
+      `hermes/${machine}: unsafe session id ${JSON.stringify(key)}`,
+    )
+  }
 }
 
 function parseLine<T>(schema: z.ZodType<T>, line: string, context: string): T {
@@ -69,68 +92,79 @@ function parseLine<T>(schema: z.ZodType<T>, line: string, context: string): T {
   return result.data
 }
 
+type StagedSession = {
+  dir: string
+  path: string
+  chunks: string[]
+}
+
 export async function splitJsonlToSessionFiles(opts: {
   lines: AsyncIterable<string>
   dataDir: string
   machine: string
-}): Promise<SplitterMetrics> {
+}): Promise<StagedSplit> {
   const metrics: SplitterMetrics = {
     sessions_pulled: 0,
     messages_pulled: 0,
     bytes: 0,
     sessionPaths: [],
   }
+  const staged: StagedSession[] = []
   let currentKey: string | null = null
-  let handle: FileHandle | null = null
+  let current: StagedSession | null = null
 
-  try {
-    for await (const line of opts.lines) {
-      if (line.length === 0) continue
-      const env = parseLine(
-        rowEnvelopeSchema,
+  for await (const line of opts.lines) {
+    if (line.length === 0) continue
+    const env = parseLine(
+      rowEnvelopeSchema,
+      line,
+      `hermes/${opts.machine}: malformed row`,
+    )
+    const key = logicalKey(env)
+    if (key !== currentKey) {
+      assertSafeSegment(key, opts.machine)
+      const header = parseLine(
+        sessionHeaderSchema,
         line,
-        `hermes/${opts.machine}: malformed row`,
+        `hermes/${opts.machine}: session ${key} header`,
       )
-      const key = logicalKey(env)
-      if (key !== currentKey) {
-        if (handle !== null) await handle.close()
-        const header = parseLine(
-          sessionHeaderSchema,
-          line,
-          `hermes/${opts.machine}: session ${key} header`,
-        )
-        const dir = path.join(
-          opts.dataDir,
-          utcDay(new Date(header.latestMessageTime)),
-          opts.machine,
-          'hermes',
-        )
-        await mkdir(dir, { recursive: true })
-        const sessionPath = path.join(dir, `${key}.jsonl`)
-        handle = await open(sessionPath, 'w')
-        metrics.sessionPaths.push(sessionPath)
-        metrics.sessions_pulled += 1
-        currentKey = key
-      }
-      if (handle === null) {
-        throw new HermesRowInvalid(
-          `hermes/${opts.machine}: message ${env.sessionId} precedes its session header`,
-        )
-      }
-      if (env.type === 'message') {
-        parseLine(
-          messageRowSchema,
-          line,
-          `hermes/${opts.machine}: message ${env.sessionId}`,
-        )
-      }
-      const payload = `${line}\n`
-      await handle.write(payload)
-      metrics.bytes += Buffer.byteLength(payload)
-      if (env.type === 'message') metrics.messages_pulled += 1
+      const dir = path.join(
+        opts.dataDir,
+        utcDay(new Date(header.latestMessageTime)),
+        opts.machine,
+        'hermes',
+      )
+      const sessionPath = path.join(dir, `${key}.jsonl`)
+      current = { dir, path: sessionPath, chunks: [] }
+      staged.push(current)
+      metrics.sessionPaths.push(sessionPath)
+      metrics.sessions_pulled += 1
+      currentKey = key
     }
-  } finally {
-    if (handle !== null) await handle.close()
+    if (current === null) {
+      throw new HermesRowInvalid(
+        `hermes/${opts.machine}: message ${env.sessionId} precedes its session header`,
+      )
+    }
+    if (env.type === 'message') {
+      parseLine(
+        messageRowSchema,
+        line,
+        `hermes/${opts.machine}: message ${env.sessionId}`,
+      )
+    }
+    const payload = `${line}\n`
+    current.chunks.push(payload)
+    metrics.bytes += Buffer.byteLength(payload)
+    if (env.type === 'message') metrics.messages_pulled += 1
   }
-  return metrics
+
+  const commit = async (): Promise<void> => {
+    for (const session of staged) {
+      await mkdir(session.dir, { recursive: true })
+      await Bun.write(session.path, session.chunks.join(''))
+    }
+  }
+
+  return { ...metrics, commit }
 }

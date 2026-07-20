@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -73,6 +79,7 @@ describe('splitJsonlToSessionFiles', () => {
       dataDir,
       machine: 'echo',
     })
+    await metrics.commit()
 
     expect(readdirSync(bucket(DAY1)).sort()).toEqual(['ses_a.jsonl'])
     expect(readdirSync(bucket(DAY2)).sort()).toEqual(['ses_b.jsonl'])
@@ -121,6 +128,7 @@ describe('splitJsonlToSessionFiles', () => {
       dataDir,
       machine: 'echo',
     })
+    await metrics.commit()
 
     // One file, named for the root, routed by the logical latest message.
     expect(readdirSync(bucket(DAY2)).sort()).toEqual(['ses_root.jsonl'])
@@ -169,6 +177,7 @@ describe('splitJsonlToSessionFiles', () => {
       dataDir,
       machine: 'echo',
     })
+    await metrics.commit()
 
     expect(metrics.messages_pulled).toBe(1)
     const content = readFileSync(
@@ -227,5 +236,71 @@ describe('splitJsonlToSessionFiles', () => {
     expect(result).toBeInstanceOf(Error)
     if (!(result instanceof Error)) throw new Error('unreachable')
     expect(result.message).toContain('hermes/echo')
+  })
+
+  test('rejects a session id that would escape the day bucket', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'session',
+        id: '../evil',
+        sessionId: '../evil',
+        latestMessageTime: DAY1_MS,
+      }),
+    ]
+    const result = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    if (!(result instanceof Error)) throw new Error('unreachable')
+    expect(result.message).toContain('hermes/echo')
+    expect(result.message).toContain('unsafe session id')
+  })
+
+  test('stages files and writes none until commit is called', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_a',
+        sessionId: 'ses_a',
+        latestMessageTime: DAY1_MS,
+      }),
+      messageLine({ id: 'msg_a1', sessionId: 'ses_a' }),
+    ]
+    const staged = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    })
+
+    // The stream validated but nothing is on disk yet.
+    expect(existsSync(bucket(DAY1))).toBe(false)
+    await staged.commit()
+    expect(readdirSync(bucket(DAY1)).sort()).toEqual(['ses_a.jsonl'])
+  })
+
+  test('leaves no final file when a late row is malformed', async () => {
+    const lines = [
+      JSON.stringify({
+        type: 'session',
+        id: 'ses_a',
+        sessionId: 'ses_a',
+        latestMessageTime: DAY1_MS,
+      }),
+      messageLine({ id: 'msg_a1', sessionId: 'ses_a' }),
+      '{"type":"message","id":"m2","sessionId":"ses_a","role":"user","content":"hi","createdAt":null}',
+    ]
+    const result = await splitJsonlToSessionFiles({
+      lines: fromArray(lines),
+      dataDir,
+      machine: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    // The malformed row aborts the stream before commit, so no partial file
+    // survives from the rows that did validate.
+    expect(existsSync(bucket(DAY1))).toBe(false)
   })
 })

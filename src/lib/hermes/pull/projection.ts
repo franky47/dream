@@ -6,14 +6,21 @@ import type { Database } from 'bun:sqlite'
 // the sqlite3 CLI and local reads over bun:sqlite share one code path.
 //
 // The raw archive keeps every selected field, including the system prompt,
-// model configuration, usage, lineage, archive state and platform origin.
-// `model_config`, `tool_calls` and `origin_json` hold nested JSON, so they pass
-// through `json()` (guarded by `json_valid`) to embed as real JSON rather than
-// an escaped string. Platform identity lives in discrete columns plus the rich
-// `origin_json` blob, merged here into one `platform` object. Usage lives in
-// discrete token columns, gathered here into one `usage` object. The Markdown
-// renderer omits the noisy fields (system prompt, model config, reasoning)
-// while keeping the archive complete.
+// model configuration, usage, lineage, cost, working-directory and platform
+// origin. `model_config`, `tool_calls` and `origin_json` hold nested JSON, so
+// they pass through `json()` (guarded by `json_valid`) to embed as real JSON. A
+// blob that fails `json_valid` degrades to its ORIGINAL string, never NULL, so
+// a malformed value survives the archive intact instead of vanishing.
+//
+// Platform identity lives in discrete columns and the rich `origin_json` blob.
+// The projection keeps the two apart: `platform` holds only the discrete
+// columns (which the Markdown renderer reads as scalar fields), while
+// `originJson` carries the raw blob verbatim. Merging them here with
+// `json_patch` risked an RFC-7396 delete of a discrete id, so the merged view
+// is left for the renderer to build. Usage lives in discrete token columns,
+// gathered here into one `usage` object. The Markdown renderer omits the noisy
+// fields (system prompt, model config, reasoning) while keeping the archive
+// complete.
 //
 // Hermes timestamps are REAL epoch seconds; the projection multiplies by 1000
 // so every downstream consumer sees milliseconds.
@@ -48,19 +55,20 @@ function backgroundSourceList(): string {
   return BACKGROUND_SOURCES.map((s) => `'${s}'`).join(', ')
 }
 
-// Reads whichever JSON column holds a nested value, guarding on `json_valid` so
-// a malformed blob degrades to NULL rather than failing the whole projection.
+// Reads whichever column holds a nested JSON value, embedding it as real JSON
+// when `json_valid` passes. A NULL stays NULL; a malformed blob degrades to its
+// ORIGINAL string so the raw archive never silently drops a value it could not
+// parse.
 function jsonColumn(expr: string): string {
-  return `CASE WHEN ${expr} IS NOT NULL AND json_valid(${expr}) THEN json(${expr}) ELSE NULL END`
+  return `CASE WHEN ${expr} IS NULL THEN NULL WHEN json_valid(${expr}) THEN json(${expr}) ELSE ${expr} END`
 }
 
 // Platform identity spans discrete columns and the richer `origin_json` blob.
-// `json_patch` merges the two into one flat object (origin_json wins on
-// overlap), which the frontmatter renderer reads as scalar fields. The origin
-// side is only merged when it is a JSON object; a non-object blob would make
-// `json_patch` discard the discrete columns wholesale, so it degrades to empty.
+// This object carries only the discrete columns; the frontmatter renderer reads
+// them as scalar fields. The raw `origin_json` travels separately (see
+// `originJson`) so no RFC-7396 merge can overwrite or delete a discrete id.
 function platformObject(): string {
-  const discrete = `json_object(
+  return `json_object(
     'user_id', h.user_id,
     'session_key', h.session_key,
     'chat_id', h.chat_id,
@@ -68,8 +76,6 @@ function platformObject(): string {
     'thread_id', h.thread_id,
     'display_name', h.display_name
   )`
-  const origin = `CASE WHEN h.origin_json IS NOT NULL AND json_valid(h.origin_json) AND json_type(h.origin_json) = 'object' THEN json(h.origin_json) ELSE json_object() END`
-  return `json_patch(${discrete}, ${origin})`
 }
 
 function usageObject(): string {
@@ -89,9 +95,9 @@ function usageObject(): string {
 // Groups a Hermes root and its rotated continuations into one logical session.
 //
 // `human` drops background work first, so continuations only ever attach to a
-// human root. `message_bounds` finds each session's opening turn in
-// milliseconds; a session with a `parent_id` whose opening turn's content
-// starts with the compaction marker is a `continuation`. `chain` walks each
+// human root. A session with a `parent_id` whose first `user` turn (the lowest
+// `messages.id`, so leading or interleaved `session_meta` rows never mask it)
+// opens with the compaction marker is a `continuation`. `chain` walks each
 // continuation up to its non-continuation root, and `member` self-roots any
 // session the walk never reached, so a continuation with a broken parent link
 // still surfaces as its own logical session rather than vanishing.
@@ -108,7 +114,11 @@ function logicalSessionsCte(
       SELECT id, source, parent_session_id AS parent_id, title, archived,
              system_prompt, model, model_config,
              user_id, session_key, chat_id, chat_type, thread_id, display_name,
-             origin_json, started_at,
+             origin_json, started_at, ended_at, end_reason,
+             cwd, git_branch, git_repo_root,
+             billing_provider, billing_base_url, billing_mode,
+             cost_status, cost_source, pricing_version,
+             api_call_count, profile_name, rewind_count, expiry_finalized,
              message_count, tool_call_count,
              input_tokens, output_tokens, cache_read_tokens,
              cache_write_tokens, reasoning_tokens,
@@ -117,9 +127,7 @@ function logicalSessionsCte(
       WHERE source IS NULL OR source NOT IN (${backgroundSourceList()})
     ),
     message_bounds AS (
-      SELECT session_id,
-             MIN(timestamp * 1000) AS first_ts,
-             MAX(timestamp * 1000) AS last_ts
+      SELECT session_id, MAX(timestamp * 1000) AS last_ts
       FROM messages
       GROUP BY session_id
     ),
@@ -130,9 +138,13 @@ function logicalSessionsCte(
         AND EXISTS (
           SELECT 1
           FROM messages m
-          JOIN message_bounds b
-            ON b.session_id = m.session_id AND b.first_ts = m.timestamp * 1000
           WHERE m.session_id = h.id
+            AND m.role = 'user'
+            AND m.id = (
+              SELECT MIN(m2.id)
+              FROM messages m2
+              WHERE m2.session_id = h.id AND m2.role = 'user'
+            )
             AND substr(m.content, 1, ${COMPACTION_SUMMARY_PREFIX_LEN}) =
                 '${COMPACTION_SUMMARY_PREFIX}'
         )
@@ -182,18 +194,35 @@ function projectionSqlTemplate(
           'parentId', h.parent_id,
           'archived', h.archived,
           'createdAt', h.started_at * 1000,
+          'endedAt', h.ended_at * 1000,
+          'endReason', h.end_reason,
           'latestMessageTime', e.latest_message_time,
           'systemPrompt', h.system_prompt,
           'model', h.model,
           'modelConfig', ${jsonColumn('h.model_config')},
+          'cwd', h.cwd,
+          'gitBranch', h.git_branch,
+          'gitRepoRoot', h.git_repo_root,
+          'billingProvider', h.billing_provider,
+          'billingBaseUrl', h.billing_base_url,
+          'billingMode', h.billing_mode,
+          'costStatus', h.cost_status,
+          'costSource', h.cost_source,
+          'pricingVersion', h.pricing_version,
+          'apiCallCount', h.api_call_count,
+          'profileName', h.profile_name,
+          'rewindCount', h.rewind_count,
+          'expiryFinalized', h.expiry_finalized,
+          'sessionKey', h.session_key,
           'usage', ${usageObject()},
-          'platform', ${platformObject()}
+          'platform', ${platformObject()},
+          'originJson', ${jsonColumn('h.origin_json')}
         ) AS row,
         mem.root_id AS logical_id,
         mem.depth AS depth,
         h.id AS session_id,
         0 AS type_rank,
-        h.started_at * 1000 AS ts
+        0 AS msg_id
       FROM human h
       JOIN member mem ON mem.id = h.id
       JOIN eligible e ON e.root_id = mem.root_id
@@ -211,6 +240,10 @@ function projectionSqlTemplate(
           'createdAt', m.timestamp * 1000,
           'active', m.active,
           'compacted', m.compacted,
+          'effectDisposition', m.effect_disposition,
+          'tokenCount', m.token_count,
+          'finishReason', m.finish_reason,
+          'observed', m.observed,
           'toolCallId', m.tool_call_id,
           'toolCalls', ${jsonColumn('m.tool_calls')},
           'toolName', m.tool_name,
@@ -226,12 +259,12 @@ function projectionSqlTemplate(
         mem.depth AS depth,
         m.session_id AS session_id,
         1 AS type_rank,
-        m.timestamp * 1000 AS ts
+        m.id AS msg_id
       FROM messages m
       JOIN member mem ON mem.id = m.session_id
       JOIN eligible e ON e.root_id = mem.root_id
     )
-    ORDER BY logical_id, depth, session_id, type_rank, ts, row
+    ORDER BY logical_id, depth, session_id, type_rank, msg_id
   `
 }
 

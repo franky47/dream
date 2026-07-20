@@ -322,6 +322,49 @@ describe('runSshHermesPipeline', () => {
     expect(result.message).toContain('ssh=255')
     expect(result.message).toContain('Could not resolve')
   })
+
+  test('writes no final files when the transport exits non-zero mid-stream', async () => {
+    // A full, valid session streams out, then the transport dies. The staged
+    // rows never reach disk because commit is gated on a clean exit.
+    const fixturePath = path.join(workDir, 'fixture.jsonl')
+    writeFileSync(
+      fixturePath,
+      [
+        sessionLine('ses_a', DAY1_MS),
+        messageLine('msg_a', 'ses_a', DAY1_MS),
+      ].join('\n') + '\n',
+    )
+
+    const result = await runSshHermesPipeline({
+      upstream: ['sh', '-c', `cat ${fixturePath}; exit 3`],
+      dataDir,
+      host: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    expect(listFiles(dataDir)).toEqual([])
+  })
+
+  test('writes no final files when a late row is malformed', async () => {
+    const fixturePath = path.join(workDir, 'fixture.jsonl')
+    writeFileSync(
+      fixturePath,
+      [
+        sessionLine('ses_a', DAY1_MS),
+        messageLine('msg_a', 'ses_a', DAY1_MS),
+        '{"type":"message","id":"m2","sessionId":"ses_a","role":"user","content":"hi","createdAt":null}',
+      ].join('\n') + '\n',
+    )
+
+    const result = await runSshHermesPipeline({
+      upstream: ['cat', fixturePath],
+      dataDir,
+      host: 'echo',
+    }).catch((e: unknown) => e)
+
+    expect(result).toBeInstanceOf(Error)
+    expect(listFiles(dataDir)).toEqual([])
+  })
 })
 
 describe('buildRemoteMemoryCmd', () => {

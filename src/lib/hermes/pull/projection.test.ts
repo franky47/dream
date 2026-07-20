@@ -24,10 +24,12 @@ const SUMMARY_CONTENT = `${COMPACTION_PREFIX} handoff, avoid repeating it:\nEarl
 let workDir: string
 let dbPath: string
 
-// The real Echo schema: sessions keyed by TEXT id with discrete platform-identity
-// columns plus an origin_json blob, REAL epoch-second timestamps, model_config
-// JSON, and discrete usage counters. Messages autoincrement an INTEGER id,
-// carry nullable content, a tool_calls JSON array, and active/compacted flags.
+// The real Echo schema, copied verbatim from the live state db's DDL so no live
+// column can silently drop out of the projection: rebuilding a reduced copy is
+// what let `ended_at` (and its neighbours) go missing before. Only the two FTS5
+// virtual tables are added here — the live dump omits their CREATE statements,
+// yet the message triggers below reference them, so the fixture supplies a
+// minimal pair to keep inserts working. Every data value inserted is synthetic.
 const SCHEMA_STATEMENTS = [
   `CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
@@ -39,14 +41,14 @@ const SCHEMA_STATEMENTS = [
     thread_id TEXT,
     display_name TEXT,
     origin_json TEXT,
+    expiry_finalized INTEGER DEFAULT 0,
     model TEXT,
     model_config TEXT,
     system_prompt TEXT,
     parent_session_id TEXT,
     started_at REAL NOT NULL,
     ended_at REAL,
-    title TEXT,
-    archived INTEGER NOT NULL DEFAULT 0,
+    end_reason TEXT,
     message_count INTEGER DEFAULT 0,
     tool_call_count INTEGER DEFAULT 0,
     input_tokens INTEGER DEFAULT 0,
@@ -54,10 +56,41 @@ const SCHEMA_STATEMENTS = [
     cache_read_tokens INTEGER DEFAULT 0,
     cache_write_tokens INTEGER DEFAULT 0,
     reasoning_tokens INTEGER DEFAULT 0,
+    cwd TEXT,
+    git_branch TEXT,
+    git_repo_root TEXT,
+    billing_provider TEXT,
+    billing_base_url TEXT,
+    billing_mode TEXT,
     estimated_cost_usd REAL,
     actual_cost_usd REAL,
+    cost_status TEXT,
+    cost_source TEXT,
+    pricing_version TEXT,
+    title TEXT,
+    api_call_count INTEGER DEFAULT 0,
+    handoff_state TEXT,
+    handoff_platform TEXT,
+    handoff_error TEXT,
+    compression_failure_cooldown_until REAL,
+    compression_failure_error TEXT,
+    compression_fallback_streak INTEGER NOT NULL DEFAULT 0,
+    profile_name TEXT,
+    rewind_count INTEGER NOT NULL DEFAULT 0,
+    archived INTEGER NOT NULL DEFAULT 0,
     FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
   )`,
+  `CREATE INDEX idx_sessions_source ON sessions(source)`,
+  `CREATE INDEX idx_sessions_source_id ON sessions(source, id)`,
+  `CREATE INDEX idx_sessions_parent ON sessions(parent_session_id)`,
+  `CREATE INDEX idx_sessions_started ON sessions(started_at DESC)`,
+  `CREATE INDEX idx_sessions_session_key
+    ON sessions(session_key, started_at DESC)`,
+  `CREATE INDEX idx_sessions_gateway_peer
+    ON sessions(source, user_id, chat_id, chat_type, thread_id, started_at DESC)`,
+  `CREATE INDEX idx_sessions_handoff_state
+    ON sessions(handoff_state, started_at)`,
+  `CREATE UNIQUE INDEX idx_sessions_title_unique ON sessions(title) WHERE title IS NOT NULL`,
   `CREATE TABLE messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -66,17 +99,60 @@ const SCHEMA_STATEMENTS = [
     tool_call_id TEXT,
     tool_calls TEXT,
     tool_name TEXT,
+    effect_disposition TEXT,
     timestamp REAL NOT NULL,
+    token_count INTEGER,
+    finish_reason TEXT,
     reasoning TEXT,
     reasoning_content TEXT,
     reasoning_details TEXT,
     codex_reasoning_items TEXT,
     codex_message_items TEXT,
     platform_message_id TEXT,
+    observed INTEGER DEFAULT 0,
     active INTEGER NOT NULL DEFAULT 1,
-    compacted INTEGER NOT NULL DEFAULT 0,
-    api_content TEXT
-  )`,
+    compacted INTEGER NOT NULL DEFAULT 0
+, "api_content" TEXT)`,
+  `CREATE INDEX idx_messages_session ON messages(session_id, timestamp)`,
+  `CREATE INDEX idx_messages_platform_msg_id ON messages(session_id, platform_message_id) WHERE platform_message_id IS NOT NULL`,
+  `CREATE INDEX idx_messages_session_active
+    ON messages(session_id, active, timestamp)`,
+  `CREATE INDEX idx_messages_active_null
+    ON messages(active) WHERE active IS NULL`,
+  `CREATE VIRTUAL TABLE messages_fts USING fts5(content)`,
+  `CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content, tokenize='trigram')`,
+  `CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (
+        new.id,
+        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    );
+END`,
+  `CREATE TRIGGER messages_fts_delete AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.id;
+END`,
+  `CREATE TRIGGER messages_fts_update AFTER UPDATE ON messages BEGIN
+    DELETE FROM messages_fts WHERE rowid = old.id;
+    INSERT INTO messages_fts(rowid, content) VALUES (
+        new.id,
+        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    );
+END`,
+  `CREATE TRIGGER messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+        new.id,
+        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    );
+END`,
+  `CREATE TRIGGER messages_fts_trigram_delete AFTER DELETE ON messages BEGIN
+    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+END`,
+  `CREATE TRIGGER messages_fts_trigram_update AFTER UPDATE ON messages BEGIN
+    DELETE FROM messages_fts_trigram WHERE rowid = old.id;
+    INSERT INTO messages_fts_trigram(rowid, content) VALUES (
+        new.id,
+        COALESCE(new.content, '') || ' ' || COALESCE(new.tool_name, '') || ' ' || COALESCE(new.tool_calls, '')
+    );
+END`,
 ]
 
 function openFreshDb(): Database {
@@ -93,7 +169,7 @@ function insertSession(
     id: string
     source?: string | null
     parentSessionId?: string | null
-    title?: string
+    title?: string | null
     archived?: number
     systemPrompt?: string | null
     model?: string | null
@@ -115,6 +191,21 @@ function insertSession(
     estimatedCostUsd?: number | null
     actualCostUsd?: number | null
     startedAt?: number
+    endedAt?: number | null
+    endReason?: string | null
+    cwd?: string | null
+    gitBranch?: string | null
+    gitRepoRoot?: string | null
+    billingProvider?: string | null
+    billingBaseUrl?: string | null
+    billingMode?: string | null
+    costStatus?: string | null
+    costSource?: string | null
+    pricingVersion?: string | null
+    apiCallCount?: number
+    profileName?: string | null
+    rewindCount?: number
+    expiryFinalized?: number
   },
 ): void {
   db.prepare(
@@ -122,7 +213,11 @@ function insertSession(
        (id, source, parent_session_id, title, archived,
         system_prompt, model, model_config,
         user_id, session_key, chat_id, chat_type, thread_id, display_name,
-        origin_json, started_at,
+        origin_json, started_at, ended_at, end_reason,
+        cwd, git_branch, git_repo_root,
+        billing_provider, billing_base_url, billing_mode,
+        cost_status, cost_source, pricing_version,
+        api_call_count, profile_name, rewind_count, expiry_finalized,
         message_count, tool_call_count,
         input_tokens, output_tokens, cache_read_tokens,
         cache_write_tokens, reasoning_tokens,
@@ -130,7 +225,11 @@ function insertSession(
      VALUES ($id, $source, $parent, $title, $archived,
         $systemPrompt, $model, $modelConfig,
         $userId, $sessionKey, $chatId, $chatType, $threadId, $displayName,
-        $originJson, $startedAt,
+        $originJson, $startedAt, $endedAt, $endReason,
+        $cwd, $gitBranch, $gitRepoRoot,
+        $billingProvider, $billingBaseUrl, $billingMode,
+        $costStatus, $costSource, $pricingVersion,
+        $apiCallCount, $profileName, $rewindCount, $expiryFinalized,
         $messageCount, $toolCallCount,
         $inputTokens, $outputTokens, $cacheReadTokens,
         $cacheWriteTokens, $reasoningTokens,
@@ -139,7 +238,7 @@ function insertSession(
     $id: s.id,
     $source: s.source === undefined ? 'discord' : s.source,
     $parent: s.parentSessionId ?? null,
-    $title: s.title ?? 'untitled',
+    $title: s.title ?? null,
     $archived: s.archived ?? 0,
     $systemPrompt: s.systemPrompt ?? null,
     $model: s.model ?? null,
@@ -152,6 +251,21 @@ function insertSession(
     $displayName: s.displayName ?? null,
     $originJson: s.originJson ?? null,
     $startedAt: (s.startedAt ?? 1_000) / 1000,
+    $endedAt: s.endedAt == null ? null : s.endedAt / 1000,
+    $endReason: s.endReason ?? null,
+    $cwd: s.cwd ?? null,
+    $gitBranch: s.gitBranch ?? null,
+    $gitRepoRoot: s.gitRepoRoot ?? null,
+    $billingProvider: s.billingProvider ?? null,
+    $billingBaseUrl: s.billingBaseUrl ?? null,
+    $billingMode: s.billingMode ?? null,
+    $costStatus: s.costStatus ?? null,
+    $costSource: s.costSource ?? null,
+    $pricingVersion: s.pricingVersion ?? null,
+    $apiCallCount: s.apiCallCount ?? 0,
+    $profileName: s.profileName ?? null,
+    $rewindCount: s.rewindCount ?? 0,
+    $expiryFinalized: s.expiryFinalized ?? 0,
     $messageCount: s.messageCount ?? 0,
     $toolCallCount: s.toolCallCount ?? 0,
     $inputTokens: s.inputTokens ?? 0,
@@ -177,15 +291,21 @@ function insertMessage(
     toolCallId?: string | null
     toolCalls?: string | null
     toolName?: string | null
+    effectDisposition?: string | null
+    tokenCount?: number | null
+    finishReason?: string | null
+    observed?: number
     createdAt: number
   },
 ): void {
   db.prepare(
     `INSERT INTO messages
        (id, session_id, role, content, active, compacted,
-        reasoning, tool_call_id, tool_calls, tool_name, timestamp)
+        reasoning, tool_call_id, tool_calls, tool_name,
+        effect_disposition, token_count, finish_reason, observed, timestamp)
      VALUES ($id, $sessionId, $role, $content, $active, $compacted,
-        $reasoning, $toolCallId, $toolCalls, $toolName, $timestamp)`,
+        $reasoning, $toolCallId, $toolCalls, $toolName,
+        $effectDisposition, $tokenCount, $finishReason, $observed, $timestamp)`,
   ).run({
     $id: m.id,
     $sessionId: m.sessionId,
@@ -197,6 +317,10 @@ function insertMessage(
     $toolCallId: m.toolCallId ?? null,
     $toolCalls: m.toolCalls ?? null,
     $toolName: m.toolName ?? null,
+    $effectDisposition: m.effectDisposition ?? null,
+    $tokenCount: m.tokenCount ?? null,
+    $finishReason: m.finishReason ?? null,
+    $observed: m.observed ?? 0,
     $timestamp: m.createdAt / 1000,
   })
 }
@@ -262,6 +386,51 @@ describe('projectRows', () => {
     expect(rows[1]?.type).toBe('message')
     expect(rows[1]?.id).toBe(1)
     expect(rows[2]?.id).toBe(2)
+    db.close()
+  })
+
+  test('orders same-timestamp messages by insertion id, not JSON text', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_1', startedAt: 5_000 })
+    // Two rows share a timestamp; id 10 sorts before id 9 as raw JSON text, so a
+    // text tiebreak would place a tool result ahead of its call. Insertion id
+    // (INTEGER AUTOINCREMENT) is the true order.
+    insertMessage(db, { id: 9, sessionId: 'ses_1', createdAt: 6_000 })
+    insertMessage(db, { id: 10, sessionId: 'ses_1', createdAt: 6_000 })
+
+    const messages = parseRows(
+      projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }),
+    ).filter((r) => r.type === 'message')
+
+    expect(messages.map((m) => m.id)).toEqual([9, 10])
+    db.close()
+  })
+
+  test('orders a tail copy carrying an old timestamp by its higher id', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_1', startedAt: 5_000 })
+    // A compaction preserves a tail copy that keeps its OLD timestamp, inserted
+    // after the newer summary row. A timestamp sort would drop the copy ahead of
+    // the summary; insertion id keeps the archive window intact.
+    insertMessage(db, { id: 1, sessionId: 'ses_1', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 2,
+      sessionId: 'ses_1',
+      content: 'newer summary',
+      createdAt: 9_000,
+    })
+    insertMessage(db, {
+      id: 3,
+      sessionId: 'ses_1',
+      content: 'tail copy with old ts',
+      createdAt: 6_000,
+    })
+
+    const messages = parseRows(
+      projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }),
+    ).filter((r) => r.type === 'message')
+
+    expect(messages.map((m) => m.id)).toEqual([1, 2, 3])
     db.close()
   })
 
@@ -455,16 +624,108 @@ describe('projectRows', () => {
       outputTokens: 340,
       estimatedCostUsd: 0.012,
     })
-    // origin_json fields merge over the discrete identity columns into one block.
-    expect(session?.platform).toMatchObject({
+    // Platform carries only the discrete identity columns; the origin blob is
+    // never merged in (an RFC-7396 merge could delete a discrete id).
+    expect(session?.platform).toEqual({
       user_id: '787',
+      session_key: null,
       chat_id: '42',
       chat_type: 'thread',
+      thread_id: '42',
       display_name: 'François Best',
+    })
+    // The raw origin blob travels verbatim as its own field for the archive.
+    expect(session?.originJson).toEqual({
       platform: 'discord',
       chatName: '47ng / #hermes-home',
       scopeId: '1342',
     })
+    db.close()
+  })
+
+  test('keeps a malformed nested blob as its original string, never null', () => {
+    const db = openFreshDb()
+    insertSession(db, {
+      id: 'ses_1',
+      modelConfig: '{not valid json',
+      originJson: 'not-json-at-all',
+      startedAt: 5_000,
+    })
+    insertMessage(db, {
+      id: 1,
+      sessionId: 'ses_1',
+      toolCalls: '[oops',
+      createdAt: 6_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+    const session = rows[0]
+    const message = rows[1]
+
+    expect(session?.modelConfig).toBe('{not valid json')
+    expect(session?.originJson).toBe('not-json-at-all')
+    expect(message?.toolCalls).toBe('[oops')
+    db.close()
+  })
+
+  test('round-trips the full set of live session and message columns', () => {
+    const db = openFreshDb()
+    insertSession(db, {
+      id: 'ses_1',
+      startedAt: 5_000,
+      endedAt: 9_000,
+      endReason: 'idle_timeout',
+      cwd: '/home/echo/project',
+      gitBranch: 'feat/hermes',
+      gitRepoRoot: '/home/echo/project',
+      billingProvider: 'anthropic',
+      billingBaseUrl: 'https://api.example.test',
+      billingMode: 'metered',
+      costStatus: 'final',
+      costSource: 'provider',
+      pricingVersion: '2026-07',
+      apiCallCount: 7,
+      profileName: 'default',
+      rewindCount: 2,
+      expiryFinalized: 1,
+      sessionKey: 'sk_abc',
+    })
+    insertMessage(db, {
+      id: 1,
+      sessionId: 'ses_1',
+      role: 'assistant',
+      effectDisposition: 'applied',
+      tokenCount: 42,
+      finishReason: 'stop',
+      observed: 1,
+      createdAt: 6_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+    const session = rows[0]
+    const message = rows[1]
+
+    expect(session?.endedAt).toBe(9_000)
+    expect(session?.endReason).toBe('idle_timeout')
+    expect(session?.cwd).toBe('/home/echo/project')
+    expect(session?.gitBranch).toBe('feat/hermes')
+    expect(session?.gitRepoRoot).toBe('/home/echo/project')
+    expect(session?.billingProvider).toBe('anthropic')
+    expect(session?.billingBaseUrl).toBe('https://api.example.test')
+    expect(session?.billingMode).toBe('metered')
+    expect(session?.costStatus).toBe('final')
+    expect(session?.costSource).toBe('provider')
+    expect(session?.pricingVersion).toBe('2026-07')
+    expect(session?.apiCallCount).toBe(7)
+    expect(session?.profileName).toBe('default')
+    expect(session?.rewindCount).toBe(2)
+    expect(session?.expiryFinalized).toBe(1)
+    expect(session?.sessionKey).toBe('sk_abc')
+
+    expect(message?.effectDisposition).toBe('applied')
+    expect(message?.tokenCount).toBe(42)
+    expect(message?.finishReason).toBe('stop')
+    expect(message?.observed).toBe(1)
     db.close()
   })
 
@@ -642,6 +903,41 @@ describe('rotated continuation chains', () => {
     expect(rows.map((r) => r.id)).toEqual(['ses_root', 1, 'ses_cont', 2, 3])
     const cont = rows.find((r) => r.id === 'ses_cont')
     expect(cont?.parentId).toBe('ses_root')
+    db.close()
+  })
+
+  test('detects a continuation past a leading session_meta row', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_root', source: 'discord', startedAt: 5_000 })
+    insertMessage(db, { id: 1, sessionId: 'ses_root', createdAt: 6_000 })
+    insertSession(db, {
+      id: 'ses_cont',
+      source: 'discord',
+      parentSessionId: 'ses_root',
+      startedAt: 7_000,
+    })
+    // A session_meta row leads the continuation and carries the earliest
+    // timestamp, so detection on MIN(timestamp) would read the wrong row. The
+    // first user turn (by insertion id) is the compaction summary.
+    insertMessage(db, {
+      id: 2,
+      sessionId: 'ses_cont',
+      role: 'session_meta',
+      content: '{"model":"big"}',
+      createdAt: 6_500,
+    })
+    insertMessage(db, {
+      id: 3,
+      sessionId: 'ses_cont',
+      role: 'user',
+      content: SUMMARY_CONTENT,
+      createdAt: 7_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+
+    expect(physicalIds(rows)).toEqual(['ses_root', 'ses_cont'])
+    expect(logicalIds(rows)).toEqual(['ses_root', 'ses_root'])
     db.close()
   })
 

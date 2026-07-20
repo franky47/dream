@@ -1,2 +1,6 @@
 export { buildProjectionSql, projectRows } from './projection.ts'
-export { splitJsonlToSessionFiles, type SplitterMetrics } from './splitter.ts'
+export {
+  splitJsonlToSessionFiles,
+  type SplitterMetrics,
+  type StagedSplit,
+} from './splitter.ts'
