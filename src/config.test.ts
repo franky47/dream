@@ -82,6 +82,39 @@ describe('parseConfig', () => {
     expect(result.remoteOpencodeHosts).toEqual(['hex', 'm4-pro'])
   })
 
+  test('remoteHermesHosts is empty when DREAM_REMOTE_HERMES_HOSTS is unset', () => {
+    const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
+    if (result instanceof Error) throw result
+    expect(result.remoteHermesHosts).toEqual([])
+  })
+
+  test('parses a single-host DREAM_REMOTE_HERMES_HOSTS', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_HERMES_HOSTS: 'echo',
+    })
+    if (result instanceof Error) throw result
+    expect(result.remoteHermesHosts).toEqual(['echo'])
+  })
+
+  test('parses comma-separated DREAM_REMOTE_HERMES_HOSTS', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_HERMES_HOSTS: 'echo,alpha,beta',
+    })
+    if (result instanceof Error) throw result
+    expect(result.remoteHermesHosts).toEqual(['echo', 'alpha', 'beta'])
+  })
+
+  test('trims whitespace and ignores empty entries in DREAM_REMOTE_HERMES_HOSTS', () => {
+    const result = parseConfig({
+      DREAM_DATA_DIR: '/tmp/dream-data',
+      DREAM_REMOTE_HERMES_HOSTS: ' echo , , alpha ,',
+    })
+    if (result instanceof Error) throw result
+    expect(result.remoteHermesHosts).toEqual(['echo', 'alpha'])
+  })
+
   test('firefoxProfiles is empty when DREAM_FIREFOX_PROFILES is unset', () => {
     const result = parseConfig({ DREAM_DATA_DIR: '/tmp/dream-data' })
     if (result instanceof Error) throw result
