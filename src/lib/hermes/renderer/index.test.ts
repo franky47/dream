@@ -137,6 +137,167 @@ describe('renderHermesSession', () => {
     expect(md).not.toContain('platform:')
   })
 
+  test('omits rewound user, assistant and tool rows from Markdown', () => {
+    const md = renderHermesSession(
+      jsonl([
+        SESSION,
+        {
+          type: 'message',
+          id: 'msg_live_user',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'user',
+          content: 'Live question that stays.',
+          active: 1,
+          createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_rewound_user',
+          sessionId: 'ses_1',
+          turn: 2,
+          role: 'user',
+          content: 'Withdrawn user request.',
+          active: 0,
+          createdAt: Date.UTC(2026, 4, 9, 12, 1, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_rewound_assistant',
+          sessionId: 'ses_1',
+          turn: 2,
+          role: 'assistant',
+          content: 'Withdrawn assistant reply.',
+          active: 0,
+          createdAt: Date.UTC(2026, 4, 9, 12, 1, 30),
+        },
+        {
+          type: 'message',
+          id: 'msg_rewound_tool',
+          sessionId: 'ses_1',
+          turn: 2,
+          role: 'tool',
+          content: 'Withdrawn tool output.',
+          active: 0,
+          createdAt: Date.UTC(2026, 4, 9, 12, 1, 45),
+        },
+        {
+          type: 'message',
+          id: 'msg_live_assistant',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'assistant',
+          content: 'Live answer that stays.',
+          active: 1,
+          createdAt: Date.UTC(2026, 4, 9, 12, 2, 0),
+        },
+      ]),
+    )
+
+    expect(md).toContain('Live question that stays.')
+    expect(md).toContain('Live answer that stays.')
+    expect(md).not.toContain('Withdrawn user request.')
+    expect(md).not.toContain('Withdrawn assistant reply.')
+    expect(md).not.toContain('Withdrawn tool output.')
+  })
+
+  test('rewound rows do not skew turns or time bounds', () => {
+    const withRewound = renderHermesSession(
+      jsonl([
+        SESSION,
+        {
+          type: 'message',
+          id: 'msg_live_user',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'user',
+          content: 'Live question.',
+          active: 1,
+          createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_rewound_user',
+          sessionId: 'ses_1',
+          turn: 2,
+          role: 'user',
+          content: 'Withdrawn user request.',
+          active: 0,
+          createdAt: Date.UTC(2026, 4, 9, 13, 0, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_live_assistant',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'assistant',
+          content: 'Live answer.',
+          active: 1,
+          createdAt: Date.UTC(2026, 4, 9, 12, 1, 0),
+        },
+      ]),
+    )
+
+    // One rewound user turn at 13:00 would inflate the count to 2 and push the
+    // end bound out an hour if it leaked into the rendered view.
+    expect(withRewound).toContain('turns: 1')
+    expect(withRewound).toContain('endedAt: 2026-05-09T12:01:00.000Z')
+    expect(withRewound).not.toContain('Withdrawn user request.')
+  })
+
+  test('drops rewound rows around a compaction summary while the summary stays', () => {
+    const md = renderHermesSession(
+      jsonl([
+        SESSION,
+        {
+          type: 'message',
+          id: 'msg_rewound_before',
+          sessionId: 'ses_1',
+          turn: 1,
+          role: 'user',
+          content: 'Withdrawn before compaction.',
+          active: 0,
+          createdAt: Date.UTC(2026, 4, 9, 12, 0, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_summary',
+          sessionId: 'ses_1',
+          turn: 2,
+          role: 'user',
+          content: 'Compaction summary that Hermes sent to the model.',
+          active: 1,
+          createdAt: Date.UTC(2026, 4, 9, 12, 1, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_rewound_after',
+          sessionId: 'ses_1',
+          turn: 3,
+          role: 'assistant',
+          content: 'Withdrawn after compaction.',
+          active: 0,
+          createdAt: Date.UTC(2026, 4, 9, 12, 2, 0),
+        },
+        {
+          type: 'message',
+          id: 'msg_live_after',
+          sessionId: 'ses_1',
+          turn: 3,
+          role: 'assistant',
+          content: 'Live reply after compaction.',
+          active: 1,
+          createdAt: Date.UTC(2026, 4, 9, 12, 3, 0),
+        },
+      ]),
+    )
+
+    expect(md).toContain('Compaction summary that Hermes sent to the model.')
+    expect(md).toContain('Live reply after compaction.')
+    expect(md).not.toContain('Withdrawn before compaction.')
+    expect(md).not.toContain('Withdrawn after compaction.')
+  })
+
   test('keeps the rest of the frontmatter when platform is not an object', () => {
     const md = renderHermesSession(jsonl([{ ...SESSION, platform: 'discord' }]))
     expect(md).toContain('sessionId: ses_1')

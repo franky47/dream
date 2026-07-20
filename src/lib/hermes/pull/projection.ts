@@ -12,6 +12,11 @@ import type { Database } from 'bun:sqlite'
 // ones (system prompt, model settings, reasoning) while keeping the archive
 // complete.
 //
+// Inactive rows stay in the projection too. A `/undo` withdraws a turn from the
+// live conversation but the row keeps its place in the archive, carrying its
+// `active` state so the Markdown renderer can drop it while the raw record
+// retains Hermes' audit trail.
+//
 // Background sources are machine-driven work that never belongs in the human
 // archive. Selecting by source (rather than by root-only lineage) lets a
 // user-created branch through: a branch keeps its parent's human source, so it
@@ -68,8 +73,6 @@ function projectionSqlTemplate(
           'archived', s.archived,
           'createdAt', s.created_at,
           'latestMessageTime', e.latest_message_time,
-          'parentId', s.parent_id,
-          'archived', s.archived,
           'systemPrompt', s.system_prompt,
           'model', s.model,
           'modelSettings', json(s.model_settings),
@@ -93,6 +96,7 @@ function projectionSqlTemplate(
           'role', m.role,
           'content', m.content,
           'createdAt', m.created_at,
+          'active', m.active,
           'reasoning', m.reasoning,
           'metadata', json(m.metadata)
         ) AS row,

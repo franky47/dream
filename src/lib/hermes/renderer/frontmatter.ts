@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { isRewound } from './rewound.ts'
+
 const RENDERER_VERSION = 'hermes-md@1'
 
 // Platform origin travels as a nested object on the session row. Keep the parse
@@ -82,6 +84,7 @@ export function extractFrontmatter(jsonlText: string): Frontmatter {
       session ??= sess.data
       continue
     }
+    if (isRewound(raw)) continue
     const msg = messageRowSchema.safeParse(raw)
     if (msg.success) messages.push(msg.data)
   }

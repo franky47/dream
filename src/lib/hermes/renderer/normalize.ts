@@ -10,6 +10,7 @@ import type {
 
 import { stripDiscordTriggerNote } from './discord.ts'
 import { extractFrontmatter, frontmatterToYaml } from './frontmatter.ts'
+import { isRewound } from './rewound.ts'
 
 const messageRowSchema = z.object({
   type: z.literal('message'),
@@ -80,6 +81,7 @@ export function normalize(jsonlText: string): NormalizedSession {
   const frontmatterYaml = frontmatterToYaml(extractFrontmatter(jsonlText))
 
   const messages: NormalizedMessage[] = []
+<<<<<<< HEAD
   const pending = new Map<string, ToolPart>()
   let currentAssistant: NormalizedMessage | null = null
 
@@ -122,6 +124,7 @@ export function normalize(jsonlText: string): NormalizedSession {
   }
 
   for (const raw of raws) {
+    if (isRewound(raw)) continue
     const parsed = messageRowSchema.safeParse(raw)
     if (!parsed.success) continue
     const { role, content, createdAt } = parsed.data
