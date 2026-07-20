@@ -79,7 +79,15 @@ function isToolEnvelope(item: unknown): boolean {
 export function normalize(jsonlText: string): NormalizedSession {
   const raws = parseLines(jsonlText)
   const frontmatterYaml = frontmatterToYaml(extractFrontmatter(jsonlText))
+  return { frontmatterYaml, messages: normalizeMessages(raws) }
+}
 
+// Pairs Codex tool rows and folds text rows into an ordered message stream. The
+// fragment renderer feeds each context window through this same seam, so every
+// path shares one tool-pairing, Discord-stripping and rewound-skipping rule.
+export function normalizeMessages(
+  raws: readonly unknown[],
+): NormalizedMessage[] {
   const messages: NormalizedMessage[] = []
   const pending = new Map<string, ToolPart>()
   let currentAssistant: NormalizedMessage | null = null
@@ -147,5 +155,5 @@ export function normalize(jsonlText: string): NormalizedSession {
     addText(normalizedRole, text, createdAt)
   }
 
-  return { frontmatterYaml, messages }
+  return messages
 }
