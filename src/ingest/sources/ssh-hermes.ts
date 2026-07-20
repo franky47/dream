@@ -6,7 +6,7 @@ import { Glob } from 'bun'
 import * as errore from 'errore'
 
 import { buildProjectionSql, splitJsonlToSessionFiles } from '#lib/hermes/pull'
-import { renderHermesSession } from '#lib/hermes/renderer'
+import { renderHermesFragments } from '#lib/hermes/renderer'
 import { utcDay } from '#lib/utc-day'
 import type { Source } from '#src/ingest/orchestrator'
 
@@ -168,8 +168,12 @@ export async function runSshHermesPipeline(opts: {
   const { sessionPaths, ...metrics } = splitResult
   for (const jsonlPath of sessionPaths) {
     const jsonlText = await Bun.file(jsonlPath).text()
-    const md = renderHermesSession(jsonlText)
-    await Bun.write(jsonlPath.replace(/\.jsonl$/, '.md'), md)
+    const base = jsonlPath.replace(/\.jsonl$/, '')
+    for (const fragment of renderHermesFragments(jsonlText)) {
+      const suffix =
+        fragment.contextWindow === null ? '' : `.${fragment.contextWindow}`
+      await Bun.write(`${base}${suffix}.md`, fragment.markdown)
+    }
   }
 
   return metrics

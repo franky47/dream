@@ -454,6 +454,42 @@ describe('projectRows', () => {
     db.close()
   })
 
+  test('retains pre-compaction rows, the summary row and live rows in order', () => {
+    const db = openFreshDb()
+    insertSession(db, { id: 'ses_1', createdAt: 5_000 })
+    insertMessage(db, {
+      id: 'msg_old',
+      sessionId: 'ses_1',
+      content: 'earlier question',
+      createdAt: 6_000,
+    })
+    insertMessage(db, {
+      id: 'msg_summary',
+      sessionId: 'ses_1',
+      role: 'assistant',
+      content:
+        '[hermes:compaction-summary]\nWe discussed X.\n[/hermes:compaction-summary]',
+      createdAt: 7_000,
+    })
+    insertMessage(db, {
+      id: 'msg_live',
+      sessionId: 'ses_1',
+      content: 'follow-up question',
+      createdAt: 8_000,
+    })
+
+    const rows = parseRows(projectRows({ db, sinceMs: 0, untilMs: UNTIL_MS }))
+    const messages = rows.filter((r) => r.type === 'message')
+
+    expect(messages.map((m) => m.id)).toEqual([
+      'msg_old',
+      'msg_summary',
+      'msg_live',
+    ])
+    expect(messages[1]?.content).toContain('[hermes:compaction-summary]')
+    db.close()
+  })
+
   test('emits null for missing optional metadata without inventing values', () => {
     const db = openFreshDb()
     insertSession(db, { id: 'ses_1', createdAt: 5_000 })
@@ -468,6 +504,7 @@ describe('projectRows', () => {
     expect(session?.modelSettings).toBeNull()
     expect(session?.usage).toBeNull()
     expect(session?.platform).toBeNull()
+    expect(message?.active).toBe(1)
     expect(message?.reasoning).toBeNull()
     expect(message?.metadata).toBeNull()
     db.close()

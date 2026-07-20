@@ -15,7 +15,10 @@ import type { Database } from 'bun:sqlite'
 // Inactive rows stay in the projection too. A `/undo` withdraws a turn from the
 // live conversation but the row keeps its place in the archive, carrying its
 // `active` state so the Markdown renderer can drop it while the raw record
-// retains Hermes' audit trail.
+// retains Hermes' audit trail. Compaction itself has no dedicated flag: the
+// summary row is a normal message whose `content` carries stable markers,
+// retained verbatim, and the rows it archived keep their place in the raw
+// record.
 //
 // Background sources are machine-driven work that never belongs in the human
 // archive. Selecting by source (rather than by root-only lineage) lets a
