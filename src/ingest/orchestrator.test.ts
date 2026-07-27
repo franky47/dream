@@ -51,6 +51,56 @@ describe('orchestrator.run', () => {
     expect(observed).toEqual(['false', 'false'])
   })
 
+  test("with clearScope 'source', clears only the selected sources' subtrees", async () => {
+    const stale = seedFile('2026-05-08/m4x/fake/stale.txt', 'old')
+    const sibling = seedFile('2026-05-08/m4x/claude/keep.txt', 'keep')
+    const otherMachine = seedFile('2026-05-08/hex/fake/keep.txt', 'keep')
+
+    const source: Source = {
+      machine: 'm4x',
+      source: 'fake',
+      pull: async () => ({}),
+    }
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      clearScope: 'source',
+    })
+
+    expect(existsSync(stale)).toBe(false)
+    expect(existsSync(sibling)).toBe(true)
+    expect(existsSync(otherMachine)).toBe(true)
+  })
+
+  test("with clearScope 'source', clears duplicate machine/source pairs once", async () => {
+    seedFile('2026-05-08/m4x/fake/stale.txt', 'old')
+
+    const cleared: string[] = []
+    const make = (): Source => ({
+      machine: 'm4x',
+      source: 'fake',
+      pull: async () => ({}),
+    })
+    const outcome = await run({
+      sources: [make(), make()],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      clearScope: 'source',
+      clearDir: async (dir) => {
+        cleared.push(dir)
+      },
+    })
+    if (outcome instanceof Error) throw new Error('unexpected fatal')
+
+    expect(cleared).toEqual([
+      path.join(dataDir, '2026-05-08', 'm4x', 'fake'),
+      path.join(dataDir, '2026-05-09', 'm4x', 'fake'),
+    ])
+  })
+
   test('leaves day-buckets outside the window untouched', async () => {
     const keep = seedFile('2026-05-01/m4x/claude/keep.txt', 'keep')
     const meta = seedFile('_meta/2026-05-09.json', '{}')
@@ -92,8 +142,8 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
-      clearDay: async (day) =>
-        new IngestFatal({ reason: `cannot clear ${day}` }),
+      clearDir: async (dir) =>
+        new IngestFatal({ reason: `cannot clear ${dir}` }),
     })
     expect(IngestFatal.is(outcome)).toBe(true)
   })

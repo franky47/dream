@@ -1,5 +1,3 @@
-import { parseArgs } from 'node:util'
-
 import * as errore from 'errore'
 import { z } from 'zod'
 
@@ -19,25 +17,11 @@ function parseWindowValue(raw: string): Date | null {
   return null
 }
 
-export function resolveWindow(argv: string[], now: Date) {
-  const parsed = errore.try({
-    try: () =>
-      parseArgs({
-        args: argv,
-        options: {
-          since: { type: 'string' },
-          until: { type: 'string' },
-        },
-        strict: true,
-        allowPositionals: true,
-      }),
-    catch: (e) =>
-      new WindowError({ reason: 'could not parse arguments', cause: e }),
-  })
-  if (parsed instanceof Error) return parsed
-
-  const sinceRaw = parsed.values.since
-  const untilRaw = parsed.values.until
+export function resolveWindow(
+  opts: { since: string | undefined; until: string | undefined },
+  now: Date,
+) {
+  const { since: sinceRaw, until: untilRaw } = opts
 
   if (untilRaw !== undefined && sinceRaw === undefined) {
     return new WindowError({ reason: '--until requires --since' })

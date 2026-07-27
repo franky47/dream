@@ -93,15 +93,38 @@ async function runOne({
   }
 }
 
-async function clearDayBucket(dayDir: string): Promise<IngestFatal | void> {
-  const removed = await rm(dayDir, { recursive: true, force: true }).catch(
+async function clearBucket(dir: string): Promise<IngestFatal | void> {
+  const removed = await rm(dir, { recursive: true, force: true }).catch(
     (e) =>
       new IngestFatal({
-        reason: `failed to clear day-bucket ${dayDir}`,
+        reason: `failed to clear bucket ${dir}`,
         cause: e,
       }),
   )
   if (removed instanceof Error) return removed
+}
+
+// A run only rewrites what its sources pull, so it must only clear that much:
+// scope 'day' (full run) wipes whole day-buckets, sweeping orphans from
+// decommissioned hosts; scope 'source' (filtered run) wipes only the selected
+// sources' machine/source subtrees, leaving sibling sources' data intact.
+type ClearScope = 'day' | 'source'
+
+function clearTargets(opts: {
+  sources: ReadonlyArray<Source>
+  dataDir: string
+  since: Date
+  until: Date
+  clearScope: ClearScope
+}): string[] {
+  const days = daysInRange(opts.since, opts.until)
+  if (opts.clearScope === 'day') {
+    return days.map((day) => path.join(opts.dataDir, day))
+  }
+  const targets = days.flatMap((day) =>
+    opts.sources.map((s) => path.join(opts.dataDir, day, s.machine, s.source)),
+  )
+  return [...new Set(targets)]
 }
 
 export async function run(opts: {
@@ -109,15 +132,14 @@ export async function run(opts: {
   dataDir: string
   since: Date
   until: Date
-  clearDay?: (dayDir: string) => Promise<IngestFatal | void>
+  clearScope?: ClearScope
+  clearDir?: (dir: string) => Promise<IngestFatal | void>
 }): Promise<IngestFatal | RunOutcome> {
   const runStartedAt = new Date()
-  const clear = opts.clearDay ?? clearDayBucket
+  const clear = opts.clearDir ?? clearBucket
 
   const cleared = await Promise.all(
-    daysInRange(opts.since, opts.until).map((day) =>
-      clear(path.join(opts.dataDir, day)),
-    ),
+    clearTargets({ ...opts, clearScope: opts.clearScope ?? 'day' }).map(clear),
   )
   const clearFailure = cleared.find((c) => c instanceof Error)
   if (clearFailure) return clearFailure
