@@ -12,6 +12,7 @@ import { ingestLocalFirefox } from '#src/ingest/sources/local-firefox'
 import { ingestLocalOpencode } from '#src/ingest/sources/local-opencode'
 import { ingestLocalPi } from '#src/ingest/sources/local-pi'
 import { ingestSshClaude } from '#src/ingest/sources/ssh-claude'
+import { ingestSshHermes } from '#src/ingest/sources/ssh-hermes'
 import { ingestSshOpencode } from '#src/ingest/sources/ssh-opencode'
 import { resolveWindow } from '#src/ingest/window'
 
@@ -45,6 +46,7 @@ async function main(): Promise<number> {
     }),
     ...cfg.remoteClaudeHosts.map((host) => ingestSshClaude({ host })),
     ...cfg.remoteOpencodeHosts.map((host) => ingestSshOpencode({ host })),
+    ...cfg.remoteHermesHosts.map((host) => ingestSshHermes({ host })),
     ...cfg.firefoxProfiles.map((name) =>
       ingestLocalFirefox({
         machine: cfg.machine,

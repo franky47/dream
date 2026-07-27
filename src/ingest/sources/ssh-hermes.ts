@@ -1,0 +1,395 @@
+import { mkdir, mkdtemp, readdir, rm, stat, unlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+
+import { Glob } from 'bun'
+import * as errore from 'errore'
+
+import { buildProjectionSql, splitJsonlToSessionFiles } from '#lib/hermes/pull'
+import { renderHermesFragments } from '#lib/hermes/renderer'
+import { utcDay } from '#lib/utc-day'
+import type { Source } from '#src/ingest/orchestrator'
+
+const SOURCE = 'hermes'
+// The command reaches ssh as a single argv string and runs in the remote login
+// shell. `quoteRemotePath` leaves this default unquoted, so `$HOME` expands
+// there; a bare `~` would expand too, so `$HOME` is a style choice, not a
+// correctness one. The real quoting hazard is the caller-supplied branch, which
+// `quoteRemotePath` single-quotes: inside single quotes neither `~` nor `$HOME`
+// expands, so a custom path must be a literal absolute path.
+const DEFAULT_REMOTE_DB_PATH = '$HOME/.hermes/state.db'
+const DEFAULT_REMOTE_MEMORY_DIR = '$HOME/.hermes/memories'
+
+// Hermes keeps exactly two built-in memory files. Every other entry in the
+// memory directory (lock files, the state db, optional provider data) stays
+// out of the copy.
+const MEMORY_FILES: ReadonlySet<string> = new Set(['MEMORY.md', 'USER.md'])
+
+class SshSourceFailure extends errore.createTaggedError({
+  name: 'SshSourceFailure',
+  message:
+    'ssh+sqlite3 failed for $machine/$source (host=$host, ssh=$sshExit): $stderr',
+}) {}
+
+function shellSingleQuote(s: string): string {
+  return `'${s.replaceAll(`'`, `'\\''`)}'`
+}
+
+function quoteRemotePath(remotePath: string, defaultLiteral: string): string {
+  // The default references `$HOME`, which must reach the remote shell
+  // unquoted to expand. A caller-supplied path is shell-quoted literally.
+  if (remotePath === defaultLiteral) return remotePath
+  return shellSingleQuote(remotePath)
+}
+
+function formatSinceForFind(d: Date): string {
+  const iso = d.toISOString()
+  return `${iso.slice(0, 10)} ${iso.slice(11, 19)} UTC`
+}
+
+// Remote `find -newermt` is strictly-newer and only resolves whole seconds,
+// but the window contract is inclusive at `since`. Back the remote bound off by
+// one second so a memory file whose mtime lands exactly on the whole-second
+// `since` instant still reaches the tar stream; the authoritative local
+// `mtimeMs >= sinceMs` filter then decides what to keep.
+const FIND_OVER_INCLUSIVE_MS = 1000
+
+export function buildRemoteCmd(opts: {
+  sinceMs: number
+  untilMs: number
+  dbPath?: string
+}): string {
+  const dbPath = opts.dbPath ?? DEFAULT_REMOTE_DB_PATH
+  const sql = buildProjectionSql({
+    sinceMs: opts.sinceMs,
+    untilMs: opts.untilMs,
+  })
+  const quotedDbPath = quoteRemotePath(dbPath, DEFAULT_REMOTE_DB_PATH)
+  return `sqlite3 -readonly ${quotedDbPath} ${shellSingleQuote(sql)}`
+}
+
+// The leading `.` anchor plus `--no-recursion` keeps tar from the "cowardly
+// refusing to create an empty archive" failure when zero files reach the stream:
+// the current directory is archived as a bare entry (never its contents) that
+// the extraction side ignores.
+const EMPTY_ARCHIVE = `printf '.\\0' | tar --null --no-recursion -czf - -T -`
+
+// Only the two built-in memory files reach the tar stream: `-maxdepth 1` keeps
+// the search shallow so optional provider subdirectories stay untouched, and
+// `-newermt` bounds it below by the ingest window's since instant. `tar`
+// preserves each file's mtime so the pipeline can route by modification time.
+//
+// A fresh Hermes install has no memories directory, so the whole command guards
+// on `[ -d ]` and falls back to the empty anchored archive: a missing optional
+// directory is the empty case, not a failure that would reject the parallel
+// session pull too.
+//
+// `find` output lands in a temp file behind `&&` before tar consumes it. A raw
+// `find ... | tar` pipeline reports only tar's status, so a `find` failure would
+// masquerade as an empty success; routing through the file lets a `find` error
+// short-circuit the chain and propagate its non-zero exit.
+export function buildRemoteMemoryCmd(opts: {
+  sinceMs: number
+  memoryDir?: string
+}): string {
+  const memoryDir = opts.memoryDir ?? DEFAULT_REMOTE_MEMORY_DIR
+  const quotedDir = quoteRemotePath(memoryDir, DEFAULT_REMOTE_MEMORY_DIR)
+  const sinceStr = formatSinceForFind(
+    new Date(opts.sinceMs - FIND_OVER_INCLUSIVE_MS),
+  )
+  const find =
+    `find . -maxdepth 1 ` +
+    `\\( -name 'MEMORY.md' -o -name 'USER.md' \\) ` +
+    `-newermt '${sinceStr}' -print0`
+  const present =
+    `cd ${quotedDir} && ` +
+    `list=$(mktemp) && ` +
+    `${find} > "$list" && ` +
+    `{ printf '.\\0'; cat "$list"; } | tar --null --no-recursion -czf - -T -; ` +
+    `status=$?; rm -f "$list"; exit $status`
+  return `if [ -d ${quotedDir} ]; then ${present}; else ${EMPTY_ARCHIVE}; fi`
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// A session that compacts (or shrinks its window count) later the same day
+// re-renders into a different fragment set: unnumbered `<id>.md` becomes
+// `<id>.1.md`/`<id>.2.md`, or a wider set shrinks. Clearing the whole `<id>`
+// fragment family in the target day bucket before writing keeps stale siblings
+// from lingering beside the fresh set. The `.jsonl` never matches, and older
+// day buckets are never scanned.
+async function removeStaleFragments(dir: string, id: string): Promise<void> {
+  const pattern = new RegExp(`^${escapeRegExp(id)}(\\.\\d+)?\\.md$`)
+  const entries = await readdir(dir)
+  for (const entry of entries) {
+    if (!pattern.test(entry)) continue
+    await unlink(path.join(dir, entry))
+  }
+}
+
+async function readAll(
+  stream: ReadableStream<Uint8Array> | null,
+): Promise<string> {
+  if (!stream) return ''
+  return new Response(stream).text()
+}
+
+async function* streamToLines(
+  stream: ReadableStream<Uint8Array>,
+): AsyncIterable<string> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let buf = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx = buf.indexOf('\n')
+      while (idx !== -1) {
+        yield buf.slice(0, idx)
+        buf = buf.slice(idx + 1)
+        idx = buf.indexOf('\n')
+      }
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  buf += decoder.decode()
+  if (buf.length > 0) yield buf
+}
+
+export async function runSshHermesPipeline(opts: {
+  upstream: string[]
+  dataDir: string
+  host: string
+}): Promise<{
+  sessions_pulled: number
+  messages_pulled: number
+  bytes: number
+}> {
+  const proc = Bun.spawn(opts.upstream, {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    stdin: 'ignore',
+  })
+
+  const stdout = proc.stdout
+  if (stdout === null) {
+    throw new SshSourceFailure({
+      machine: opts.host,
+      source: SOURCE,
+      host: opts.host,
+      sshExit: -1,
+      stderr: 'stdout pipe missing',
+    })
+  }
+
+  const splitOutcome = await splitJsonlToSessionFiles({
+    lines: streamToLines(stdout),
+    dataDir: opts.dataDir,
+    machine: opts.host,
+  }).catch(
+    (e: unknown): Error => (e instanceof Error ? e : new Error(String(e))),
+  )
+
+  // A failed split stops draining stdout, so a still-healthy ssh child would
+  // block on a full pipe forever. Kill it before awaiting its exit.
+  if (splitOutcome instanceof Error) proc.kill()
+
+  const [sshExit, sshStderr] = await Promise.all([
+    proc.exited,
+    readAll(proc.stderr),
+  ])
+
+  // A transport failure is the root cause and outranks a splitter error, which
+  // over a dropped stream is only the symptom (a truncated final row). Report
+  // the transport failure first, carrying the splitter error as its cause.
+  if (sshExit !== 0) {
+    const stderr = sshStderr.trim().slice(0, 500) || '(no stderr captured)'
+    throw new SshSourceFailure({
+      machine: opts.host,
+      source: SOURCE,
+      host: opts.host,
+      sshExit,
+      stderr,
+      cause: splitOutcome instanceof Error ? splitOutcome : undefined,
+    })
+  }
+
+  // The transport exited clean, so a splitter error is a genuine malformed row
+  // rather than a dropped stream: surface it as-is.
+  if (splitOutcome instanceof Error) throw splitOutcome
+
+  // The stream drained and SSH exited clean, so the staged sessions are whole;
+  // only now do the final `.jsonl` files land on disk. A dropped transport
+  // leaves the staging in memory untouched and nothing partial behind.
+  const { sessionPaths, commit, ...metrics } = splitOutcome
+  await commit()
+  for (const jsonlPath of sessionPaths) {
+    const jsonlText = await Bun.file(jsonlPath).text()
+    const base = jsonlPath.replace(/\.jsonl$/, '')
+    await removeStaleFragments(path.dirname(base), path.basename(base))
+    for (const fragment of renderHermesFragments(jsonlText)) {
+      const suffix =
+        fragment.contextWindow === null ? '' : `.${fragment.contextWindow}`
+      await Bun.write(`${base}${suffix}.md`, fragment.markdown)
+    }
+  }
+
+  return metrics
+}
+
+class SshMemoryFailure extends errore.createTaggedError({
+  name: 'SshMemoryFailure',
+  message:
+    'ssh+tar (memory) failed for $machine/$source (host=$host, ssh=$sshExit, tar=$tarExit): $stderr',
+}) {}
+
+// Extracts the ssh+tar stream into a temp dir, then keeps only the two built-in
+// memory files whose mtime falls inside the half-open [since, until) window and
+// copies each byte-for-byte into its modification day's `memories` bucket.
+//
+// The window is half-open `[since, until)`, the same bound the session
+// projection applies. Routing each memory file into its own modification-day
+// bucket follows the same rule the Codex source uses for its memories. The
+// remote `find` can only express the lower bound, so the strict `< until` upper
+// bound is enforced here.
+export async function runSshHermesMemoryPipeline(opts: {
+  upstream: string[]
+  dataDir: string
+  host: string
+  since: Date
+  until: Date
+}): Promise<{ memories_pulled: number; bytes: number }> {
+  const stageDir = await mkdtemp(path.join(tmpdir(), 'dream-ssh-hermes-mem-'))
+  try {
+    const ssh = Bun.spawn(opts.upstream, {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      stdin: 'ignore',
+    })
+    // Spawning tar can throw (e.g. tar missing from PATH). The ssh child is
+    // already running, so kill it before propagating to avoid leaking it.
+    const tar = errore.try({
+      try: () =>
+        Bun.spawn(['tar', '-xzf', '-', '-C', stageDir], {
+          stdin: ssh.stdout,
+          stdout: 'pipe',
+          stderr: 'pipe',
+        }),
+      catch: (e) =>
+        new SshMemoryFailure({
+          machine: opts.host,
+          source: SOURCE,
+          host: opts.host,
+          sshExit: -1,
+          tarExit: -1,
+          stderr: 'tar spawn failed',
+          cause: e,
+        }),
+    })
+    if (tar instanceof Error) {
+      ssh.kill()
+      throw tar
+    }
+
+    const [sshExit, tarExit, sshStderr, tarStderr] = await Promise.all([
+      ssh.exited,
+      tar.exited,
+      readAll(ssh.stderr),
+      readAll(tar.stderr),
+    ])
+
+    if (sshExit !== 0 || tarExit !== 0) {
+      const stderr = [sshStderr, tarStderr]
+        .filter((s) => s.trim().length > 0)
+        .join(' | ')
+        .slice(0, 500)
+        .trim()
+      throw new SshMemoryFailure({
+        machine: opts.host,
+        source: SOURCE,
+        host: opts.host,
+        sshExit,
+        tarExit,
+        stderr: stderr || '(no stderr captured)',
+      })
+    }
+
+    const sinceMs = opts.since.getTime()
+    const untilMs = opts.until.getTime()
+    const glob = new Glob('**/*')
+    let memoriesPulled = 0
+    let bytes = 0
+    for await (const rel of glob.scan({ cwd: stageDir, onlyFiles: true })) {
+      const name = path.basename(rel)
+      if (!MEMORY_FILES.has(name)) continue
+      const abs = path.join(stageDir, rel)
+      const info = await stat(abs)
+      if (info.mtimeMs < sinceMs || info.mtimeMs >= untilMs) continue
+      const dst = path.join(
+        opts.dataDir,
+        utcDay(new Date(info.mtimeMs)),
+        opts.host,
+        SOURCE,
+        'memories',
+        name,
+      )
+      await mkdir(path.dirname(dst), { recursive: true })
+      bytes += await Bun.write(dst, Bun.file(abs))
+      memoriesPulled += 1
+    }
+    return { memories_pulled: memoriesPulled, bytes }
+  } finally {
+    await rm(stageDir, { recursive: true, force: true })
+  }
+}
+
+// `--` terminates ssh option parsing before the host, so a host that somehow
+// reached here starting with `-` reads as a target, never as an ssh flag. Config
+// already rejects such hosts; this is defense in depth at the argv boundary.
+export function buildSshBase(host: string): string[] {
+  return ['ssh', '-o', 'BatchMode=yes', '--', host]
+}
+
+export function ingestSshHermes(opts: { host: string }): Source {
+  return {
+    machine: opts.host,
+    source: SOURCE,
+    pull: async ({ dataDir, since, until }) => {
+      const sshBase = buildSshBase(opts.host)
+      const [sessions, memories] = await Promise.all([
+        runSshHermesPipeline({
+          upstream: [
+            ...sshBase,
+            buildRemoteCmd({
+              sinceMs: since.getTime(),
+              untilMs: until.getTime(),
+            }),
+          ],
+          dataDir,
+          host: opts.host,
+        }),
+        runSshHermesMemoryPipeline({
+          upstream: [
+            ...sshBase,
+            buildRemoteMemoryCmd({ sinceMs: since.getTime() }),
+          ],
+          dataDir,
+          host: opts.host,
+          since,
+          until,
+        }),
+      ])
+      return {
+        sessions_pulled: sessions.sessions_pulled,
+        messages_pulled: sessions.messages_pulled,
+        memories_pulled: memories.memories_pulled,
+        bytes: sessions.bytes + memories.bytes,
+      }
+    },
+  }
+}
