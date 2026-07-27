@@ -47,8 +47,64 @@ describe('orchestrator.run', () => {
       },
     }
 
-    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'all',
+    })
     expect(observed).toEqual(['false', 'false'])
+  })
+
+  test("with clearScope 'source', clears only the selected sources' subtrees", async () => {
+    const stale = seedFile('2026-05-08/m4x/fake/stale.txt', 'old')
+    const sibling = seedFile('2026-05-08/m4x/claude/keep.txt', 'keep')
+    const otherMachine = seedFile('2026-05-08/hex/fake/keep.txt', 'keep')
+
+    const source: Source = {
+      machine: 'm4x',
+      source: 'fake',
+      pull: async () => ({}),
+    }
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'filtered',
+    })
+
+    expect(existsSync(stale)).toBe(false)
+    expect(existsSync(sibling)).toBe(true)
+    expect(existsSync(otherMachine)).toBe(true)
+  })
+
+  test("with clearScope 'source', clears duplicate machine/source pairs once", async () => {
+    seedFile('2026-05-08/m4x/fake/stale.txt', 'old')
+
+    const cleared: string[] = []
+    const make = (): Source => ({
+      machine: 'm4x',
+      source: 'fake',
+      pull: async () => ({}),
+    })
+    const outcome = await run({
+      sources: [make(), make()],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'filtered',
+      clearDir: async (dir) => {
+        cleared.push(dir)
+      },
+    })
+    if (outcome instanceof Error) throw new Error('unexpected fatal')
+
+    expect(cleared).toEqual([
+      path.join(dataDir, '2026-05-08', 'm4x', 'fake'),
+      path.join(dataDir, '2026-05-09', 'm4x', 'fake'),
+    ])
   })
 
   test('leaves day-buckets outside the window untouched', async () => {
@@ -60,7 +116,13 @@ describe('orchestrator.run', () => {
       source: 'fake',
       pull: async () => ({}),
     }
-    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'all',
+    })
 
     expect(existsSync(keep)).toBe(true)
     expect(existsSync(meta)).toBe(true)
@@ -77,7 +139,13 @@ describe('orchestrator.run', () => {
       },
     }
 
-    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'all',
+    })
     expect(received).toEqual([{ dataDir, since: SINCE, until: UNTIL }])
   })
 
@@ -92,8 +160,9 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
-      clearDay: async (day) =>
-        new IngestFatal({ reason: `cannot clear ${day}` }),
+      sourceSelection: 'all',
+      clearDir: async (dir) =>
+        new IngestFatal({ reason: `cannot clear ${dir}` }),
     })
     expect(IngestFatal.is(outcome)).toBe(true)
   })
@@ -117,6 +186,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
+      sourceSelection: 'all',
     })
     if (outcome instanceof Error) throw new Error('unexpected fatal')
 
@@ -150,6 +220,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
+      sourceSelection: 'all',
     })
     if (outcome instanceof Error) throw new Error('unexpected fatal')
     for (const r of outcome.results) {
@@ -174,6 +245,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
+      sourceSelection: 'all',
     })
     const elapsed = performance.now() - start
     expect(elapsed).toBeLessThan(SLEEP_MS * 1.8)

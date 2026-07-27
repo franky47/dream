@@ -93,15 +93,38 @@ async function runOne({
   }
 }
 
-async function clearDayBucket(dayDir: string): Promise<IngestFatal | void> {
-  const removed = await rm(dayDir, { recursive: true, force: true }).catch(
+async function clearBucket(dir: string): Promise<IngestFatal | void> {
+  const removed = await rm(dir, { recursive: true, force: true }).catch(
     (e) =>
       new IngestFatal({
-        reason: `failed to clear day-bucket ${dayDir}`,
+        reason: `failed to clear bucket ${dir}`,
         cause: e,
       }),
   )
   if (removed instanceof Error) return removed
+}
+
+// A filtered run rewrites only the selected sources, so it clears only their
+// machine/source subtrees, leaving sibling sources' data intact. A full run
+// wipes whole day-buckets on purpose, sweeping orphans left by decommissioned
+// hosts or removed sources.
+type SourceSelection = 'all' | 'filtered'
+
+function clearTargets(opts: {
+  sources: ReadonlyArray<Source>
+  dataDir: string
+  since: Date
+  until: Date
+  sourceSelection: SourceSelection
+}): string[] {
+  const days = daysInRange(opts.since, opts.until)
+  if (opts.sourceSelection === 'all') {
+    return days.map((day) => path.join(opts.dataDir, day))
+  }
+  const targets = days.flatMap((day) =>
+    opts.sources.map((s) => path.join(opts.dataDir, day, s.machine, s.source)),
+  )
+  return [...new Set(targets)]
 }
 
 export async function run(opts: {
@@ -109,16 +132,13 @@ export async function run(opts: {
   dataDir: string
   since: Date
   until: Date
-  clearDay?: (dayDir: string) => Promise<IngestFatal | void>
+  sourceSelection: SourceSelection
+  clearDir?: (dir: string) => Promise<IngestFatal | void>
 }): Promise<IngestFatal | RunOutcome> {
   const runStartedAt = new Date()
-  const clear = opts.clearDay ?? clearDayBucket
+  const clear = opts.clearDir ?? clearBucket
 
-  const cleared = await Promise.all(
-    daysInRange(opts.since, opts.until).map((day) =>
-      clear(path.join(opts.dataDir, day)),
-    ),
-  )
+  const cleared = await Promise.all(clearTargets(opts).map(clear))
   const clearFailure = cleared.find((c) => c instanceof Error)
   if (clearFailure) return clearFailure
 

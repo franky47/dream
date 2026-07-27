@@ -12,6 +12,21 @@ To run:
 bun run
 ```
 
+## Ingest
+
+`bun run ingest` pulls every configured source over the last 48 hours. Flags:
+
+- `--since <date>` / `--until <date>` — ISO date or datetime window.
+  `--until` requires `--since`; a bare date means UTC midnight.
+- `-s, --source <name>[:<local|remote>]` — pull only matching sources.
+  Repeatable; terms union. Names: `claude`, `codex`, `firefox`, `hermes`,
+  `opencode`, `pi`. Without a location, a name matches both transports.
+  A term matching no configured source fails the run before any pull.
+- `-h, --help` — usage.
+
+A full run rebuilds each day-bucket in the window; a filtered run rewrites only
+the selected sources' subtrees and leaves sibling data in place.
+
 ## Remote sources
 
 Remote sources read another machine over your existing SSH setup. List their
