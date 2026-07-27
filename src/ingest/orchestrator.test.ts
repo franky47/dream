@@ -47,7 +47,13 @@ describe('orchestrator.run', () => {
       },
     }
 
-    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'all',
+    })
     expect(observed).toEqual(['false', 'false'])
   })
 
@@ -66,7 +72,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
-      clearScope: 'source',
+      sourceSelection: 'filtered',
     })
 
     expect(existsSync(stale)).toBe(false)
@@ -88,7 +94,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
-      clearScope: 'source',
+      sourceSelection: 'filtered',
       clearDir: async (dir) => {
         cleared.push(dir)
       },
@@ -110,7 +116,13 @@ describe('orchestrator.run', () => {
       source: 'fake',
       pull: async () => ({}),
     }
-    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'all',
+    })
 
     expect(existsSync(keep)).toBe(true)
     expect(existsSync(meta)).toBe(true)
@@ -127,7 +139,13 @@ describe('orchestrator.run', () => {
       },
     }
 
-    await run({ sources: [source], dataDir, since: SINCE, until: UNTIL })
+    await run({
+      sources: [source],
+      dataDir,
+      since: SINCE,
+      until: UNTIL,
+      sourceSelection: 'all',
+    })
     expect(received).toEqual([{ dataDir, since: SINCE, until: UNTIL }])
   })
 
@@ -142,6 +160,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
+      sourceSelection: 'all',
       clearDir: async (dir) =>
         new IngestFatal({ reason: `cannot clear ${dir}` }),
     })
@@ -167,6 +186,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
+      sourceSelection: 'all',
     })
     if (outcome instanceof Error) throw new Error('unexpected fatal')
 
@@ -200,6 +220,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
+      sourceSelection: 'all',
     })
     if (outcome instanceof Error) throw new Error('unexpected fatal')
     for (const r of outcome.results) {
@@ -224,6 +245,7 @@ describe('orchestrator.run', () => {
       dataDir,
       since: SINCE,
       until: UNTIL,
+      sourceSelection: 'all',
     })
     const elapsed = performance.now() - start
     expect(elapsed).toBeLessThan(SLEEP_MS * 1.8)

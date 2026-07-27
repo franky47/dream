@@ -47,31 +47,30 @@ describe('parseCliArgs', () => {
 
   test('parses a bare source name with no transport', () => {
     const args = unwrap(parseCliArgs(['--source', 'claude']))
-    expect(args.sourceFilters).toEqual([
-      { raw: 'claude', name: 'claude', transport: null },
-    ])
+    expect(args.sourceFilters).toEqual([{ name: 'claude', transport: null }])
   })
 
   test('parses a name:location term', () => {
     const args = unwrap(parseCliArgs(['--source', 'claude:local']))
-    expect(args.sourceFilters).toEqual([
-      { raw: 'claude:local', name: 'claude', transport: 'local' },
-    ])
+    expect(args.sourceFilters).toEqual([{ name: 'claude', transport: 'local' }])
   })
 
   test('accepts the -s short alias', () => {
     const args = unwrap(parseCliArgs(['-s', 'pi']))
-    expect(args.sourceFilters).toEqual([
-      { raw: 'pi', name: 'pi', transport: null },
-    ])
+    expect(args.sourceFilters).toEqual([{ name: 'pi', transport: null }])
   })
 
   test('accumulates repeated --source flags in order', () => {
     const args = unwrap(parseCliArgs(['-s', 'claude', '-s', 'pi:remote']))
     expect(args.sourceFilters).toEqual([
-      { raw: 'claude', name: 'claude', transport: null },
-      { raw: 'pi:remote', name: 'pi', transport: 'remote' },
+      { name: 'claude', transport: null },
+      { name: 'pi', transport: 'remote' },
     ])
+  })
+
+  test('rejects positional arguments', () => {
+    const error = expectError(parseCliArgs(['claude']))
+    expect(error.message).toContain('positional')
   })
 
   test('rejects an unknown source name, listing valid names', () => {
@@ -149,11 +148,7 @@ function filter(
   name: SourceFilter['name'],
   transport: Transport | null = null,
 ): SourceFilter {
-  return {
-    raw: transport === null ? name : `${name}:${transport}`,
-    name,
-    transport,
-  }
+  return { name, transport }
 }
 
 describe('applySourceFilters', () => {
@@ -207,14 +202,27 @@ describe('applySourceFilters', () => {
       }),
     )
     expect(error.message).toContain('--source hermes:local')
-    expect(error.message).toContain('matches no configured source')
+    expect(error.message).toContain('no configured source')
   })
 
-  test('rejects when any one of several terms matches nothing', () => {
-    const result = applySourceFilters({
-      filters: [filter('claude'), filter('codex')],
-      sources: FLEET,
-    })
-    expect(CliError.is(result)).toBe(true)
+  test('lists the configured sources in a no-match error', () => {
+    const error = expectError(
+      applySourceFilters({
+        filters: [filter('codex')],
+        sources: FLEET,
+      }),
+    )
+    expect(error.message).toContain('claude:local (mac)')
+    expect(error.message).toContain('hermes:remote (hex)')
+  })
+
+  test('names every non-matching term at once', () => {
+    const error = expectError(
+      applySourceFilters({
+        filters: [filter('codex'), filter('claude'), filter('hermes', 'local')],
+        sources: FLEET,
+      }),
+    )
+    expect(error.message).toContain('codex, hermes:local')
   })
 })

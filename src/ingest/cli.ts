@@ -52,7 +52,7 @@ const sourceTermSchema = z.string().transform((raw, ctx) => {
     return z.NEVER
   }
   if (transportPart === undefined) {
-    return { raw, name: name.data, transport: null }
+    return { name: name.data, transport: null }
   }
   const transport = transportSchema.safeParse(transportPart)
   if (!transport.success) {
@@ -62,7 +62,7 @@ const sourceTermSchema = z.string().transform((raw, ctx) => {
     })
     return z.NEVER
   }
-  return { raw, name: name.data, transport: transport.data }
+  return { name: name.data, transport: transport.data }
 })
 
 export type SourceFilter = z.infer<typeof sourceTermSchema>
@@ -93,7 +93,7 @@ export function parseCliArgs(argv: string[]): CliArgs | CliError {
           help: { type: 'boolean', short: 'h' },
         },
         strict: true,
-        allowPositionals: true,
+        allowPositionals: false,
       }),
     catch: (e) =>
       new CliError({
@@ -131,18 +131,32 @@ function matches(
   return filter.transport === null || filter.transport === entry.transport
 }
 
-export function applySourceFilters<S extends { source: string }>(opts: {
+function describeFilter(filter: SourceFilter): string {
+  return filter.transport === null
+    ? filter.name
+    : `${filter.name}:${filter.transport}`
+}
+
+export function applySourceFilters<
+  S extends { source: string; machine: string },
+>(opts: {
   filters: ReadonlyArray<SourceFilter>
   sources: ReadonlyArray<{ transport: Transport; source: S }>
 }): S[] | CliError {
   if (opts.filters.length === 0) return opts.sources.map((e) => e.source)
 
-  for (const filter of opts.filters) {
-    if (!opts.sources.some((entry) => matches(filter, entry))) {
-      return new CliError({
-        reason: `--source ${filter.raw} matches no configured source`,
-      })
-    }
+  const misses = opts.filters.filter(
+    (filter) => !opts.sources.some((entry) => matches(filter, entry)),
+  )
+  if (misses.length > 0) {
+    const configured = opts.sources
+      .map((e) => `${e.source.source}:${e.transport} (${e.source.machine})`)
+      .join(', ')
+    return new CliError({
+      reason: `no configured source matches --source ${misses
+        .map(describeFilter)
+        .join(', ')}; configured: ${configured}`,
+    })
   }
 
   return opts.sources

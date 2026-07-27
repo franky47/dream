@@ -93,8 +93,6 @@ async function main(): Promise<number> {
           blocklistPath: fileURLToPath(
             new URL('../../config/firefox-blocklist.txt', import.meta.url),
           ),
-          // A backfill run (explicit --until) only writes past day-buckets, so
-          // the "now" snapshot sub-sources are skipped.
           includeSnapshots: !untilWasExplicit,
         }),
       ),
@@ -116,7 +114,7 @@ async function main(): Promise<number> {
     dataDir: cfg.dataDir,
     since,
     until,
-    clearScope: cli.sourceFilters.length > 0 ? 'source' : 'day',
+    sourceSelection: cli.sourceFilters.length > 0 ? 'filtered' : 'all',
   })
   if (outcome instanceof Error) {
     console.error(outcome.message)

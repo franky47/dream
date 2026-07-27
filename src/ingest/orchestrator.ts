@@ -104,21 +104,21 @@ async function clearBucket(dir: string): Promise<IngestFatal | void> {
   if (removed instanceof Error) return removed
 }
 
-// A run only rewrites what its sources pull, so it must only clear that much:
-// scope 'day' (full run) wipes whole day-buckets, sweeping orphans from
-// decommissioned hosts; scope 'source' (filtered run) wipes only the selected
-// sources' machine/source subtrees, leaving sibling sources' data intact.
-type ClearScope = 'day' | 'source'
+// A filtered run rewrites only the selected sources, so it clears only their
+// machine/source subtrees, leaving sibling sources' data intact. A full run
+// wipes whole day-buckets on purpose, sweeping orphans left by decommissioned
+// hosts or removed sources.
+type SourceSelection = 'all' | 'filtered'
 
 function clearTargets(opts: {
   sources: ReadonlyArray<Source>
   dataDir: string
   since: Date
   until: Date
-  clearScope: ClearScope
+  sourceSelection: SourceSelection
 }): string[] {
   const days = daysInRange(opts.since, opts.until)
-  if (opts.clearScope === 'day') {
+  if (opts.sourceSelection === 'all') {
     return days.map((day) => path.join(opts.dataDir, day))
   }
   const targets = days.flatMap((day) =>
@@ -132,15 +132,13 @@ export async function run(opts: {
   dataDir: string
   since: Date
   until: Date
-  clearScope?: ClearScope
+  sourceSelection: SourceSelection
   clearDir?: (dir: string) => Promise<IngestFatal | void>
 }): Promise<IngestFatal | RunOutcome> {
   const runStartedAt = new Date()
   const clear = opts.clearDir ?? clearBucket
 
-  const cleared = await Promise.all(
-    clearTargets({ ...opts, clearScope: opts.clearScope ?? 'day' }).map(clear),
-  )
+  const cleared = await Promise.all(clearTargets(opts).map(clear))
   const clearFailure = cleared.find((c) => c instanceof Error)
   if (clearFailure) return clearFailure
 
